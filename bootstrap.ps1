@@ -122,18 +122,9 @@ Write-Host "  Files downloaded to $INSTALL_DIR" -ForegroundColor Green
 Write-Host "[5/7] Creating monitor-api account on A-SMS..." -ForegroundColor Yellow
 
 # Ignore SSL cert errors for self-signed Check Point certs
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAll : ICertificatePolicy {
-    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert,
-        WebRequest req, int problem) { return true; }
-}
-"@
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAll
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-
+# Skip SSL cert validation (self-signed Check Point certs) - PS7 compatible
+$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true
+$PSDefaultParameterValues['Invoke-WebRequest:SkipCertificateCheck'] = $true
 $mgmtApiBase = "https://${MGMT_HOST}/web_api"
 
 try {
