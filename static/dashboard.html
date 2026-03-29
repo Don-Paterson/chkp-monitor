@@ -471,9 +471,9 @@ function renderGwCard(name, gw) {
 
     // Top 4 interfaces by traffic
     const topIfaces = ifaces
-        .filter(i => i.name !== 'lo')
-        .sort((a, b) => (b.rx_bytes + b.tx_bytes) - (a.rx_bytes + a.tx_bytes))
-        .slice(0, 5);
+        .filter(i => i.name && i.name.match(/^(eth|bond|vlan)/i) && i.name !== 'lo')
+        .sort((a, b) => ((b.rx_bytes||0) + (b.tx_bytes||0)) - ((a.rx_bytes||0) + (a.tx_bytes||0)))
+        .slice(0, 6);
 
     return `
         <div class="card">
@@ -496,7 +496,7 @@ function renderGwCard(name, gw) {
                 <div class="metric ${borderClass(rag.memory)}">
                     <div class="metric-label">Memory</div>
                     <div class="metric-value ${rag.memory}">${fmtPct(os.memory_percent)}</div>
-                    <div class="metric-detail">${fmtNum(os.memory_used_mb)} / ${fmtNum(os.memory_total_mb)} MB</div>
+                    <div class="metric-detail">${fmtBytes(os.memory_active_bytes)} / ${fmtBytes(os.memory_total_bytes)}</div>
                 </div>
                 <div class="metric ${borderClass(rag.disk)}">
                     <div class="metric-label">Disk</div>
@@ -505,11 +505,13 @@ function renderGwCard(name, gw) {
                 <div class="metric ${borderClass(rag.connections)}">
                     <div class="metric-label">Connections</div>
                     <div class="metric-value ${rag.connections}">${fmtNum(fw.connections_current)}</div>
-                    <div class="metric-detail">Peak: ${fmtNum(fw.connections_peak)}</div>
+                    <div class="metric-detail">Peak: ${fmtNum(km.connections_peak || fw.connections_peak)}</div>
                 </div>
                 <div class="metric ${borderClass(rag.kernel_memory)}">
                     <div class="metric-label">Kernel Memory</div>
                     <div class="metric-value ${rag.kernel_memory}">${fmtPct(km.kernel_memory_used_percent)}</div>
+                    <div class="metric-detail">${km.kernel_memory_used_mb ? km.kernel_memory_used_mb + ' / ' + km.kernel_memory_total_mb + ' MB' : '—'}</div>
+                    ${km.watermark_status ? '<div class="metric-detail">' + km.watermark_status + '</div>' : ''}
                 </div>
                 <div class="metric">
                     <div class="metric-label">FW Drops</div>
