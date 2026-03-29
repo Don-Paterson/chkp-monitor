@@ -8,14 +8,15 @@
     irm https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/main/bootstrap.ps1 | iex
 
 .NOTES
-    - mgmt_cli commands require domain "System Data" for admin operations
-    - Gaia API access must be enabled per-user via expert mode
+    - mgmt_cli requires expert mode (bash shell), achieved by setting admin shell to /bin/bash
+    - mgmt_cli admin commands require domain "System Data" and a session
+    - Gaia API access must be enabled per-user via gaia_api command in expert mode
     - plink.exe is pre-installed at C:\Program Files\PuTTY\
-    - All commands run non-interactively via plink -batch
+    - save config persists Gaia changes across reboots
 #>
 
 $ErrorActionPreference = "Continue"
-$ProgressPreference = "SilentlyContinue"  # Speed up Invoke-WebRequest downloads
+$ProgressPreference = "SilentlyContinue"
 
 # ---- Configuration ----
 $REPO_URL      = "https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/main"
@@ -45,7 +46,7 @@ Write-Host "  chkp-monitor bootstrap" -ForegroundColor Cyan
 Write-Host "====================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ---- Helper: run a single command on remote host via plink ----
+# ---- Helper: run a single command via plink ----
 function Invoke-Plink {
     param(
         [string]$RemoteHost,
@@ -57,10 +58,23 @@ function Invoke-Plink {
     return ($output | Out-String).Trim()
 }
 
-# ---- Step 0: Accept SSH host keys for all hosts ----
+# ---- Helper: switch a Gaia user's shell to bash (expert mode) ----
+function Set-ExpertShell {
+    param([string]$RemoteHost, [string]$User, [string]$Password)
+    $null = Invoke-Plink -RemoteHost $RemoteHost -User $User -Password $Password -Command "lock database override"
+    $null = Invoke-Plink -RemoteHost $RemoteHost -User $User -Password $Password -Command "set user $User shell /bin/bash"
+}
+
+# ---- Helper: restore a Gaia user's shell to Clish ----
+function Set-ClishShell {
+    param([string]$RemoteHost, [string]$User, [string]$Password)
+    # Run clish -c from bash to set shell back
+    $null = Invoke-Plink -RemoteHost $RemoteHost -User $User -Password $Password -Command "clish -c 'set user $User shell /etc/cli.sh'"
+}
+
+# ---- Step 0: Accept SSH host keys ----
 Write-Host "[0/8] Accepting SSH host keys..." -ForegroundColor Yellow
 foreach ($h in @($MGMT_HOST, $GW01_HOST, $GW02_HOST)) {
-    # Pipe 'y' to auto-accept the host key on first connection
     $null = "y" | & $PLINK -ssh -l $GAIA_ADMIN -pw $LAB_PASSWORD $h "exit" 2>&1
     Write-Host "  Key cached for $h" -ForegroundColor Green
 }
@@ -88,14 +102,13 @@ if (-not $pythonInstalled) {
         "Include_pip=1", "Include_test=0" `
         -Wait -NoNewWindow
 
-    # Refresh PATH for this session
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                 [System.Environment]::GetEnvironmentVariable("Path", "User")
 
     Write-Host "  Python installed successfully" -ForegroundColor Green
 }
 
-# ---- Step 2: Install PowerShell 7 (optional, skip if already running in PS7) ----
+# ---- Step 2: Install PowerShell 7 ----
 Write-Host "[2/8] Checking PowerShell 7..." -ForegroundColor Yellow
 $ps7Path = "C:\Program Files\PowerShell\7\pwsh.exe"
 if (Test-Path $ps7Path) {
@@ -151,24 +164,32 @@ foreach ($file in $files) {
 
 Write-Host "  Files downloaded to $INSTALL_DIR" -ForegroundColor Green
 
-# ---- Step 5: Configure Management API on A-SMS ----
-# All mgmt_cli admin commands require domain "System Data" and a session.
-# Flow: login with domain -> get SID -> run commands with -s SID -> publish -> logout
-# We run these commands ON the A-SMS box via plink (local mgmt_cli, no -m flag needed).
+# ============================================================
+# Step 5: Configure Management API on A-SMS
+# ============================================================
+# Strategy: switch admin shell to /bin/bash so plink commands
+# run in expert mode, then use mgmt_cli with session + domain
+# "System Data" for all admin operations.
+# ============================================================
 Write-Host "[5/8] Configuring Management API on A-SMS ($MGMT_HOST)..." -ForegroundColor Yellow
 
 try {
-    # 5a: Login to mgmt_cli with domain "System Data", capture SID to file
-    Write-Host "  Logging in to management API (domain: System Data)..." -ForegroundColor White
-    $loginCmd = "mgmt_cli login user $MGMT_ADMIN password '$LAB_PASSWORD' domain ""System Data"" > /tmp/chkp-mon-sid.txt 2>&1 && echo LOGIN_OK || echo LOGIN_FAIL"
+    # 5a: Switch admin to expert mode (bash shell)
+    Write-Host "  Switching admin shell to expert mode..." -ForegroundColor White
+    Set-ExpertShell -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD
+    Write-Host "  Admin shell set to /bin/bash" -ForegroundColor Green
+
+    # 5b: Login to mgmt_cli with domain "System Data"
+    Write-Host "  Logging in (domain: System Data)..." -ForegroundColor White
+    $loginCmd = "mgmt_cli login user $MGMT_ADMIN password '$LAB_PASSWORD' domain 'System Data' --format json > /tmp/chkp-mon-sid.txt 2>&1 && echo LOGIN_OK || echo LOGIN_FAIL"
     $loginResult = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $loginCmd
 
     if ($loginResult -match "LOGIN_OK") {
-        Write-Host "  Logged in successfully" -ForegroundColor Green
+        Write-Host "  Logged in" -ForegroundColor Green
 
-        # 5b: Create monitor-api administrator (read-only)
+        # 5c: Create monitor-api administrator (read-only)
         Write-Host "  Creating $MONITOR_USER administrator..." -ForegroundColor White
-        $addCmd = "mgmt_cli add administrator name ""$MONITOR_USER"" password ""$MONITOR_PASS"" must-change-password false permissions-profile ""Read Only All"" -s /tmp/chkp-mon-sid.txt 2>&1"
+        $addCmd = "mgmt_cli add administrator name '$MONITOR_USER' password '$MONITOR_PASS' must-change-password false permissions-profile 'Read Only All' -s /tmp/chkp-mon-sid.txt --format json 2>&1"
         $addResult = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $addCmd
 
         if ($addResult -match "already exists") {
@@ -176,51 +197,54 @@ try {
         } elseif ($addResult -match "uid") {
             Write-Host "  $MONITOR_USER created" -ForegroundColor Green
         } else {
-            Write-Host "  add-administrator result: $($addResult.Substring(0, [Math]::Min(200, $addResult.Length)))" -ForegroundColor Yellow
+            Write-Host "  Result: $($addResult.Substring(0, [Math]::Min(200, $addResult.Length)))" -ForegroundColor Yellow
         }
 
-        # 5c: Open management API to all IP addresses
+        # 5d: Open management API to all IP addresses
         Write-Host "  Setting API access to all IP addresses..." -ForegroundColor White
-        $apiCmd = "mgmt_cli set api-settings accepted-api-calls-from ""All IP addresses"" -s /tmp/chkp-mon-sid.txt 2>&1"
-        $apiResult = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $apiCmd
+        $apiCmd = "mgmt_cli set api-settings accepted-api-calls-from 'All IP addresses' -s /tmp/chkp-mon-sid.txt --format json 2>&1"
+        $null = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $apiCmd
         Write-Host "  API access configured" -ForegroundColor Green
 
-        # 5d: Publish changes
+        # 5e: Publish
         Write-Host "  Publishing..." -ForegroundColor White
-        $pubCmd = "mgmt_cli publish -s /tmp/chkp-mon-sid.txt 2>&1"
+        $pubCmd = "mgmt_cli publish -s /tmp/chkp-mon-sid.txt --format json 2>&1"
         $pubResult = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $pubCmd
-
         if ($pubResult -match "succeeded") {
-            Write-Host "  Published successfully" -ForegroundColor Green
+            Write-Host "  Published" -ForegroundColor Green
         } else {
-            Write-Host "  Publish result: $($pubResult.Substring(0, [Math]::Min(200, $pubResult.Length)))" -ForegroundColor Yellow
+            Write-Host "  Publish output: $($pubResult.Substring(0, [Math]::Min(200, $pubResult.Length)))" -ForegroundColor Yellow
         }
 
-        # 5e: Logout and clean up SID file
-        $logoutCmd = "mgmt_cli logout -s /tmp/chkp-mon-sid.txt 2>&1; rm -f /tmp/chkp-mon-sid.txt"
-        $null = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $logoutCmd
+        # 5f: Logout and clean up
+        $null = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "mgmt_cli logout -s /tmp/chkp-mon-sid.txt 2>&1; rm -f /tmp/chkp-mon-sid.txt"
 
-        # 5f: Restart API to apply the accepted-api-calls-from change
+        # 5g: Restart API to apply accepted-api-calls-from
         Write-Host "  Restarting management API..." -ForegroundColor White
-        $restartCmd = "api restart 2>&1"
-        $restartResult = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $restartCmd
-
+        $restartResult = Invoke-Plink -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "api restart 2>&1"
         if ($restartResult -match "started successfully") {
-            Write-Host "  Management API restarted successfully" -ForegroundColor Green
+            Write-Host "  API restarted successfully" -ForegroundColor Green
         } else {
-            Write-Host "  API restart output: $($restartResult.Substring(0, [Math]::Min(200, $restartResult.Length)))" -ForegroundColor Yellow
+            Write-Host "  Restart output: $($restartResult.Substring(0, [Math]::Min(200, $restartResult.Length)))" -ForegroundColor Yellow
         }
+
     } else {
         Write-Host "  Login failed: $($loginResult.Substring(0, [Math]::Min(200, $loginResult.Length)))" -ForegroundColor Red
-        Write-Host "  You will need to configure the management API manually" -ForegroundColor Yellow
     }
+
+    # 5h: Restore admin shell to Clish
+    Write-Host "  Restoring admin shell to Clish..." -ForegroundColor White
+    Set-ClishShell -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD
+    Write-Host "  Shell restored" -ForegroundColor Green
 
 } catch {
     Write-Host "  Warning: Management API setup error: $_" -ForegroundColor Red
-    Write-Host "  Manual fix: SSH to A-SMS and run mgmt_cli commands (see README)" -ForegroundColor Yellow
+    Write-Host "  Manual fix: SSH to A-SMS (see README)" -ForegroundColor Yellow
+    # Try to restore shell even on error
+    try { Set-ClishShell -RemoteHost $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD } catch {}
 }
 
-# ---- Step 6: Verify Management API is accepting remote connections ----
+# ---- Step 6: Verify Management API accepts remote connections ----
 Write-Host "[6/8] Verifying Management API accepts remote connections..." -ForegroundColor Yellow
 
 $mgmtReady = $false
@@ -230,10 +254,9 @@ for ($i = 1; $i -le 12; $i++) {
         $testResp = Invoke-RestMethod -Uri "https://${MGMT_HOST}/web_api/login" -Method Post `
             -Body $testBody -ContentType "application/json" -TimeoutSec 5
         if ($testResp.sid) {
-            # Logout cleanly
-            $logoutHeaders = @{ "X-chkp-sid" = $testResp.sid }
             $null = Invoke-RestMethod -Uri "https://${MGMT_HOST}/web_api/logout" -Method Post `
-                -Body "{}" -ContentType "application/json" -Headers $logoutHeaders -TimeoutSec 5
+                -Body "{}" -ContentType "application/json" `
+                -Headers @{ "X-chkp-sid" = $testResp.sid } -TimeoutSec 5
             $mgmtReady = $true
             break
         }
@@ -243,76 +266,72 @@ for ($i = 1; $i -le 12; $i++) {
 }
 
 if ($mgmtReady) {
-    Write-Host "  Management API is ready and accepting remote connections" -ForegroundColor Green
+    Write-Host "  Management API ready and accepting remote connections" -ForegroundColor Green
 } else {
-    Write-Host "  Management API not responding yet - dashboard will keep retrying" -ForegroundColor Yellow
-    Write-Host "  If this persists, verify 'api status' on A-SMS shows 'All IP Addresses'" -ForegroundColor Yellow
+    Write-Host "  Management API not responding - dashboard will keep retrying" -ForegroundColor Yellow
+    Write-Host "  Verify on A-SMS: api status (check Accessibility field)" -ForegroundColor Yellow
 }
 
-# ---- Step 7: Create Gaia API users on gateways ----
-# Each gateway needs: user created in Clish, password set, RBA role assigned,
-# Gaia API access enabled in expert mode, config saved.
-# All done non-interactively via plink using a single compound command.
+# ============================================================
+# Step 7: Create Gaia API users on gateways
+# ============================================================
+# Strategy: switch admin shell to bash, create user with
+# password hash (non-interactive), assign RBA role, enable
+# Gaia API access, save config, restore shell.
+# ============================================================
 Write-Host "[7/8] Configuring Gaia API users on gateways..." -ForegroundColor Yellow
 
 foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
     $gwName = if ($gwHost -eq $GW01_HOST) { "A-GW-01" } else { "A-GW-02" }
 
     try {
-        # 7a: Create user, set password hash, assign RBA role, save config - all in Clish
-        # Using password-hash with openssl avoids the interactive password prompt
-        Write-Host "  [$gwName] Creating user and configuring Clish..." -ForegroundColor White
-        $clishCmd = @(
-            "add user $GAIA_MON_USER uid 0 homedir /home/$GAIA_MON_USER 2>&1 || true",
-            "set user $GAIA_MON_USER password-hash `$(openssl passwd -6 '$LAB_PASSWORD') 2>&1",
-            "add rba user $GAIA_MON_USER roles adminRole 2>&1 || true",
-            "save config 2>&1"
-        ) -join " ; "
+        # 7a: Switch to bash shell
+        Write-Host "  [$gwName] Switching to expert mode..." -ForegroundColor White
+        Set-ExpertShell -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD
 
-        $clishResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $clishCmd
+        # 7b: Create user with password hash (non-interactive)
+        Write-Host "  [$gwName] Creating user $GAIA_MON_USER..." -ForegroundColor White
+        $hashCmd = "HASH=`$(openssl passwd -6 '$LAB_PASSWORD'); clish -c 'add user $GAIA_MON_USER uid 0 homedir /home/$GAIA_MON_USER' 2>&1; clish -c ""set user $GAIA_MON_USER password-hash `$HASH"" 2>&1; clish -c 'add rba user $GAIA_MON_USER roles adminRole' 2>&1; echo USER_DONE"
+        $userResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $hashCmd
 
-        if ($clishResult -match "already exists") {
-            Write-Host "  [$gwName] User already exists, continuing..." -ForegroundColor Green
+        if ($userResult -match "already exists") {
+            Write-Host "  [$gwName] User already exists" -ForegroundColor Green
+        } elseif ($userResult -match "USER_DONE") {
+            Write-Host "  [$gwName] User created" -ForegroundColor Green
         } else {
-            Write-Host "  [$gwName] User created and config saved" -ForegroundColor Green
+            Write-Host "  [$gwName] User result: $($userResult.Substring(0, [Math]::Min(200, $userResult.Length)))" -ForegroundColor Yellow
         }
 
-        # 7b: Enable Gaia API access in expert mode
-        # Use a single bash command string that enters expert, runs the command, and exits
-        Write-Host "  [$gwName] Enabling Gaia API access (expert mode)..." -ForegroundColor White
-        $expertCmd = "bash -c 'echo ""$LAB_PASSWORD"" | /bin/cpshell -s /opt/CPshrd-R82/bin/cpshell_scripts/expert_mode.sh && gaia_api access --user $GAIA_MON_USER --enable true 2>&1 || echo EXPERT_FAILED'"
+        # 7c: Enable Gaia API access
+        Write-Host "  [$gwName] Enabling Gaia API access..." -ForegroundColor White
+        $gaiaCmd = "gaia_api access --user $GAIA_MON_USER --enable true 2>&1; echo GAIA_API_DONE"
+        $gaiaResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $gaiaCmd
 
-        # Simpler approach: use plink to run expert commands via expect-like stdin
-        # Actually, the most reliable non-interactive way is clish -c for clish commands
-        # and for expert mode, use the CLISH expert command path
-        $expertCmd2 = "clish -s -c ""lock database override"" 2>&1; echo '$LAB_PASSWORD' | expert -c ""gaia_api access --user $GAIA_MON_USER --enable true"" 2>&1 || true"
-        $expertResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $expertCmd2
-
-        # If that approach failed, try a different path
-        if ($expertResult -match "EXPERT_FAILED" -or $expertResult -match "command not found") {
-            Write-Host "  [$gwName] Trying alternative expert mode approach..." -ForegroundColor White
-            # Use script command to fake a tty, or just run as bash
-            $altCmd = "bash -lc 'source /opt/CPshrd-R82/tmp/.CPprofile.sh 2>/dev/null; gaia_api access --user $GAIA_MON_USER --enable true 2>&1'"
-            $altResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $altCmd
-            Write-Host "  [$gwName] Alternative result: $($altResult.Substring(0, [Math]::Min(150, $altResult.Length)))" -ForegroundColor Yellow
-        } else {
+        if ($gaiaResult -match "GAIA_API_DONE") {
             Write-Host "  [$gwName] Gaia API access enabled" -ForegroundColor Green
+        } else {
+            Write-Host "  [$gwName] Gaia API result: $($gaiaResult.Substring(0, [Math]::Min(200, $gaiaResult.Length)))" -ForegroundColor Yellow
         }
+
+        # 7d: Save config and restore shell
+        Write-Host "  [$gwName] Saving config and restoring shell..." -ForegroundColor White
+        $null = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "clish -c 'save config' 2>&1"
+        Set-ClishShell -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD
+        Write-Host "  [$gwName] Done" -ForegroundColor Green
 
     } catch {
         Write-Host "  Warning: Gateway setup error on ${gwName}: $_" -ForegroundColor Red
-        Write-Host "  Manual fix needed on $gwHost (see README for commands)" -ForegroundColor Yellow
+        Write-Host "  Manual fix: SSH to $gwHost (see README)" -ForegroundColor Yellow
+        try { Set-ClishShell -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD } catch {}
     }
 }
 
 # ---- Step 8: Create credentials.json and launch ----
 Write-Host "[8/8] Creating credentials and launching..." -ForegroundColor Yellow
 
-# Write credentials.json using Out-File with ASCII to avoid BOM issues
 $credJson = '{"management":{"user":"' + $MONITOR_USER + '","password":"' + $MONITOR_PASS + '"},"gaia":{"user":"' + $GAIA_MON_USER + '","password":"' + $LAB_PASSWORD + '"}}'
 $credJson | Out-File -FilePath "$INSTALL_DIR\credentials.json" -Encoding ascii -NoNewline
 
-# Verify the JSON is valid
 try {
     $null = Get-Content "$INSTALL_DIR\credentials.json" -Raw | ConvertFrom-Json
     Write-Host "  credentials.json created and validated" -ForegroundColor Green
@@ -332,10 +351,9 @@ Write-Host "  Mgmt API user:  $MONITOR_USER" -ForegroundColor White
 Write-Host "  Gaia API user:  $GAIA_MON_USER" -ForegroundColor White
 Write-Host ""
 
-# ---- Check if any steps need manual intervention ----
 if (-not $mgmtReady) {
-    Write-Host "  NOTE: Management API may need manual configuration." -ForegroundColor Yellow
-    Write-Host "  SSH to A-SMS and verify: api status" -ForegroundColor Yellow
+    Write-Host "  NOTE: Management API may need manual verification." -ForegroundColor Yellow
+    Write-Host "  SSH to A-SMS: api status" -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -343,6 +361,5 @@ Write-Host "Starting dashboard..." -ForegroundColor Yellow
 Write-Host "(Press Ctrl+C to stop)" -ForegroundColor Gray
 Write-Host ""
 
-# Launch the server
 Set-Location $INSTALL_DIR
 & python server.py
