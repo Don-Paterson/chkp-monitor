@@ -89,11 +89,19 @@ class GaiaApiCollector:
             )
             resp.raise_for_status()
             return resp.json()
-        except Exception as e:
-            logger.error(f"Gaia API {endpoint} on {gw['name']} failed: {e}")
-            if hasattr(e, "response") and e.response is not None:
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text[:300]
+                except Exception:
+                    pass
                 if e.response.status_code in (401, 403):
                     self.sessions.pop(gw["name"], None)
+            logger.error(f"Gaia API {endpoint} on {gw['name']} failed: {e} | Body: {body}")
+            return None
+        except Exception as e:
+            logger.error(f"Gaia API {endpoint} on {gw['name']} failed: {e}")
             return None
 
     def _run_script(self, gw: dict, script: str) -> str | None:
