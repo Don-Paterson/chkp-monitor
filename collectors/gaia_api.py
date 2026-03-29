@@ -25,24 +25,47 @@ class GaiaApiCollector:
         self.session_lifetime = 500
 
     def _login(self, gw: dict) -> str | None:
+        """Login to Gaia API. Tries configured port first, then alternate port.
+        Port 443 is default; shifts to 4434 when APCL/URLF blades are enabled."""
         name = gw["name"]
-        url = f"https://{gw['mgmt_ip']}:{gw['gaia_port']}/gaia_api/login"
-        try:
-            resp = requests.post(
-                url,
-                json={"user": self.user, "password": self.password},
-                verify=False,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            sid = resp.json().get("sid")
-            self.sessions[name] = {"sid": sid, "last_login": time.time()}
-            logger.info(f"Gaia API login to {name} successful")
-            return sid
-        except Exception as e:
-            logger.error(f"Gaia API login to {name} failed: {e}")
-            self.sessions.pop(name, None)
-            return None
+        ports_to_try = [gw["gaia_port"]]
+        alt_port = 4434 if gw["gaia_port"] == 443 else 443
+        ports_to_try.append(alt_port)
+
+        for port in ports_to_try:
+            url = f"https://{gw['mgmt_ip']}:{port}/gaia_api/login"
+            try:
+                resp = requests.post(
+                    url,
+                    json={"user": self.user, "password": self.password},
+                    verify=False,
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                sid = resp.json().get("sid")
+                self.sessions[name] = {"sid": sid, "last_login": time.time()}
+                # Remember the working port for future calls
+                if port != gw["gaia_port"]:
+                    logger.info(f"Gaia API on {name} detected on port {port} (not {gw['gaia_port']})")
+                    gw["gaia_port"] = port
+                logger.info(f"Gaia API login to {name} successful (port {port})")
+                return sid
+            except requests.exceptions.ConnectionError:
+                logger.debug(f"Gaia API on {name} port {port} - connection refused, trying next")
+                continue
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    logger.debug(f"Gaia API on {name} port {port} - 404, trying next")
+                    continue
+                logger.error(f"Gaia API login to {name} failed on port {port}: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Gaia API login to {name} failed on port {port}: {e}")
+                return None
+
+        logger.error(f"Gaia API login to {name} failed on all ports ({ports_to_try})")
+        self.sessions.pop(name, None)
+        return None
 
     def _ensure_session(self, gw: dict) -> str | None:
         name = gw["name"]
