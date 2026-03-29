@@ -1,0 +1,40 @@
+{
+    "dashboard": {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "poll_interval_seconds": 60,
+        "refresh_interval_seconds": 30
+    },
+    "management": {
+        "host": "10.1.1.101",
+        "port": 443,
+        "name": "A-SMS",
+        "domain": "SMC User"
+    },
+    "gateways": [
+        {
+            "name": "A-GW-01",
+            "mgmt_ip": "10.1.1.2",
+            "gaia_port": 443,
+            "ssh_port": 22
+        },
+        {
+            "name": "A-GW-02",
+            "mgmt_ip": "10.1.1.3",
+            "gaia_port": 443,
+            "ssh_port": 22
+        }
+    ],
+    "thresholds": {
+        "cpu_warn": 70,
+        "cpu_crit": 90,
+        "memory_warn": 75,
+        "memory_crit": 90,
+        "disk_warn": 80,
+        "disk_crit": 95,
+        "connections_warn": 20000,
+        "connections_crit": 40000,
+        "kernel_memory_warn": 75,
+        "kernel_memory_crit": 90
+    }
+}

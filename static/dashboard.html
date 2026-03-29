@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>chkp-monitor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0f1114;
+            --surface: #1a1d23;
+            --surface-hover: #22262e;
+            --border: #2a2e37;
+            --text: #e4e6eb;
+            --text-dim: #8b8f98;
+            --text-label: #6b7080;
+            --green: #22c55e;
+            --green-bg: rgba(34, 197, 94, 0.08);
+            --green-border: rgba(34, 197, 94, 0.25);
+            --amber: #f59e0b;
+            --amber-bg: rgba(245, 158, 11, 0.08);
+            --amber-border: rgba(245, 158, 11, 0.25);
+            --red: #ef4444;
+            --red-bg: rgba(239, 68, 68, 0.08);
+            --red-border: rgba(239, 68, 68, 0.25);
+            --unknown: #6b7280;
+            --unknown-bg: rgba(107, 114, 128, 0.08);
+            --unknown-border: rgba(107, 114, 128, 0.25);
+            --accent: #3b82f6;
+        }
+
+        body {
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text);
+        }
+
+        .header h1 span {
+            color: var(--accent);
+        }
+
+        .header-meta {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-dot.ok { background: var(--green); }
+        .status-dot.error { background: var(--red); }
+        .status-dot.starting { background: var(--amber); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 16px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            transition: border-color 0.2s;
+        }
+
+        .card:hover {
+            border-color: var(--text-dim);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .card-subtitle {
+            font-size: 11px;
+            color: var(--text-dim);
+            margin-top: 2px;
+        }
+
+        .rag-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .rag-badge.green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+        .rag-badge.amber { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-border); }
+        .rag-badge.red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+        .rag-badge.unknown { background: var(--unknown-bg); color: var(--unknown); border: 1px solid var(--unknown-border); }
+
+        .rag-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+
+        .rag-dot.green { background: var(--green); }
+        .rag-dot.amber { background: var(--amber); }
+        .rag-dot.red { background: var(--red); }
+        .rag-dot.unknown { background: var(--unknown); }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .metric {
+            padding: 10px 12px;
+            background: var(--bg);
+            border-radius: 6px;
+            border: 1px solid transparent;
+        }
+
+        .metric.green-border { border-color: var(--green-border); }
+        .metric.amber-border { border-color: var(--amber-border); }
+        .metric.red-border { border-color: var(--red-border); }
+
+        .metric-label {
+            font-size: 10px;
+            color: var(--text-label);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 4px;
+        }
+
+        .metric-value {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .metric-value.green { color: var(--green); }
+        .metric-value.amber { color: var(--amber); }
+        .metric-value.red { color: var(--red); }
+        .metric-value.unknown { color: var(--unknown); }
+
+        .metric-unit {
+            font-size: 11px;
+            color: var(--text-dim);
+            font-weight: 400;
+        }
+
+        .metric-detail {
+            font-size: 10px;
+            color: var(--text-dim);
+            margin-top: 2px;
+        }
+
+        .metric.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .cluster-members {
+            display: flex;
+            gap: 12px;
+            margin-top: 4px;
+        }
+
+        .cluster-member {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+
+        .cluster-member .state {
+            font-weight: 600;
+        }
+
+        .cluster-member .state.active { color: var(--green); }
+        .cluster-member .state.standby { color: var(--amber); }
+        .cluster-member .state.down { color: var(--red); }
+
+        .iface-table {
+            width: 100%;
+            margin-top: 8px;
+            font-size: 11px;
+            border-collapse: collapse;
+        }
+
+        .iface-table th {
+            text-align: left;
+            color: var(--text-label);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 4px 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .iface-table td {
+            padding: 4px 8px;
+            color: var(--text-dim);
+        }
+
+        .iface-table tr:hover td {
+            color: var(--text);
+        }
+
+        .section-label {
+            font-size: 11px;
+            color: var(--text-label);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 20px 0 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .mgmt-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .mgmt-item {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+
+        .mgmt-item .label {
+            color: var(--text-label);
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: 0.5px;
+        }
+
+        .mgmt-item .value {
+            margin-top: 2px;
+        }
+
+        .data-source {
+            font-size: 10px;
+            color: var(--text-label);
+            margin-top: 12px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+        }
+
+        .no-data {
+            text-align: center;
+            color: var(--text-dim);
+            padding: 40px;
+            font-size: 13px;
+        }
+
+        .no-data .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div>
+        <h1><span>chkp</span>-monitor</h1>
+    </div>
+    <div class="header-meta">
+        <span id="collector-status"></span>
+        <span id="last-update"></span>
+    </div>
+</div>
+
+<div class="grid" id="dashboard">
+    <div class="no-data">
+        <div class="spinner"></div>
+        <div>Waiting for first collection cycle...</div>
+    </div>
+</div>
+
+<script>
+const REFRESH_MS = 30000;
+
+function ragLabel(rag) {
+    const labels = { green: 'Healthy', amber: 'Warning', red: 'Critical', unknown: 'No Data' };
+    return labels[rag] || 'Unknown';
+}
+
+function fmtBytes(bytes) {
+    if (bytes === null || bytes === undefined) return '—';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+    return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function fmtNum(n) {
+    if (n === null || n === undefined) return '—';
+    return n.toLocaleString();
+}
+
+function fmtPct(n) {
+    if (n === null || n === undefined) return '—';
+    return n + '%';
+}
+
+function borderClass(rag) {
+    if (rag === 'green') return 'green-border';
+    if (rag === 'amber') return 'amber-border';
+    if (rag === 'red') return 'red-border';
+    return '';
+}
+
+function renderMgmtCard(mgmt, gwData) {
+    const m = mgmt.management || {};
+    const reachable = m.reachable;
+    const overallRag = reachable ? 'green' : 'red';
+
+    let policyHtml = '';
+    let sicHtml = '';
+
+    // Aggregate policy and SIC info from mgmt gateway objects
+    const gateways = mgmt.gateways || {};
+    for (const [name, gw] of Object.entries(gateways)) {
+        const policy = gw.policy || {};
+        const sic = gw.sic || {};
+        const sicStatus = sic.status || 'unknown';
+        const sicRag = sicStatus.toLowerCase().includes('established') ? 'green'
+            : sicStatus.toLowerCase().includes('uninitial') ? 'amber' : 'unknown';
+        const policyInstalled = policy.installed ? 'green' : 'red';
+
+        let installTime = '—';
+        if (policy.install_time) {
+            const d = new Date(policy.install_time * 1000);
+            installTime = d.toLocaleString();
+        }
+
+        policyHtml += `
+            <div class="mgmt-item">
+                <div class="label">${name} Policy</div>
+                <div class="value">${policy.name || '—'}</div>
+                <div class="value" style="font-size:10px; color: var(--${policyInstalled})">${policy.installed ? 'Installed' : 'Not Installed'}</div>
+                <div class="value" style="font-size:10px">${installTime}</div>
+            </div>
+        `;
+
+        sicHtml += `
+            <div class="mgmt-item">
+                <div class="label">${name} SIC</div>
+                <div class="value" style="color: var(--${sicRag})">${sicStatus}</div>
+            </div>
+        `;
+    }
+
+    // Cluster info
+    let clusterHtml = '';
+    const clusters = mgmt.cluster || {};
+    for (const [clusterName, cluster] of Object.entries(clusters)) {
+        const members = cluster.members || [];
+        clusterHtml += `
+            <div class="section-label">Cluster: ${clusterName}</div>
+            <div class="mgmt-info">
+                <div class="mgmt-item">
+                    <div class="label">HA Mode</div>
+                    <div class="value">${cluster.ha_mode || '—'}</div>
+                </div>
+            </div>
+            <div class="cluster-members">
+                ${members.map(m => `
+                    <div class="cluster-member">
+                        <span class="rag-dot ${m.sic_status && m.sic_status.toLowerCase().includes('established') ? 'green' : 'amber'}"></span>
+                        ${m.name} (${m.ip || '—'})
+                        <span class="state">${m.sic_status || '—'}</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+
+    return `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">${m.name || 'A-SMS'}</div>
+                    <div class="card-subtitle">${m.host || '10.1.1.101'} · Management Server</div>
+                </div>
+                <div class="rag-badge ${overallRag}">
+                    <div class="rag-dot ${overallRag}"></div>
+                    ${reachable ? 'Connected' : 'Unreachable'}
+                </div>
+            </div>
+            <div class="section-label">Policy & SIC</div>
+            <div class="mgmt-info">
+                ${policyHtml}
+                ${sicHtml}
+            </div>
+            ${clusterHtml}
+        </div>
+    `;
+}
+
+function renderGwCard(name, gw) {
+    const os = gw.os || {};
+    const fw = gw.firewall || {};
+    const km = gw.kernel_memory || {};
+    const cluster = gw.cluster || {};
+    const rag = gw.rag || {};
+    const ifaces = gw.interfaces || [];
+
+    const clusterState = cluster.cluster_state || 'unknown';
+    const clusterRag = clusterState.toLowerCase() === 'active' ? 'green'
+        : clusterState.toLowerCase() === 'standby' ? 'amber'
+        : clusterState.toLowerCase() === 'down' ? 'red' : 'unknown';
+
+    const overallRag = rag.overall || 'unknown';
+    const source = gw.data_source || 'unknown';
+    const sourceLabel = source === 'gaia_api' ? 'Gaia API' : source === 'ssh_fallback' ? 'SSH Fallback' : source;
+
+    // Top 4 interfaces by traffic
+    const topIfaces = ifaces
+        .filter(i => i.name !== 'lo')
+        .sort((a, b) => (b.rx_bytes + b.tx_bytes) - (a.rx_bytes + a.tx_bytes))
+        .slice(0, 5);
+
+    return `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">${name}</div>
+                    <div class="card-subtitle">${gw.ip || '—'} · ${clusterState}</div>
+                </div>
+                <div class="rag-badge ${overallRag}">
+                    <div class="rag-dot ${overallRag}"></div>
+                    ${ragLabel(overallRag)}
+                </div>
+            </div>
+
+            <div class="metrics">
+                <div class="metric ${borderClass(rag.cpu)}">
+                    <div class="metric-label">CPU</div>
+                    <div class="metric-value ${rag.cpu}">${fmtPct(os.cpu_percent)}</div>
+                </div>
+                <div class="metric ${borderClass(rag.memory)}">
+                    <div class="metric-label">Memory</div>
+                    <div class="metric-value ${rag.memory}">${fmtPct(os.memory_percent)}</div>
+                    <div class="metric-detail">${fmtNum(os.memory_used_mb)} / ${fmtNum(os.memory_total_mb)} MB</div>
+                </div>
+                <div class="metric ${borderClass(rag.disk)}">
+                    <div class="metric-label">Disk</div>
+                    <div class="metric-value ${rag.disk}">${fmtPct(os.disk_percent)}</div>
+                </div>
+                <div class="metric ${borderClass(rag.connections)}">
+                    <div class="metric-label">Connections</div>
+                    <div class="metric-value ${rag.connections}">${fmtNum(fw.connections_current)}</div>
+                    <div class="metric-detail">Peak: ${fmtNum(fw.connections_peak)}</div>
+                </div>
+                <div class="metric ${borderClass(rag.kernel_memory)}">
+                    <div class="metric-label">Kernel Memory</div>
+                    <div class="metric-value ${rag.kernel_memory}">${fmtPct(km.kernel_memory_used_percent)}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">FW Drops</div>
+                    <div class="metric-value">${fmtNum(fw.drops_total)}</div>
+                    <div class="metric-detail">Accepted: ${fmtNum(fw.packets_accepted)}</div>
+                </div>
+            </div>
+
+            ${cluster.members && cluster.members.length > 0 ? `
+                <div class="section-label">ClusterXL</div>
+                <div class="cluster-members">
+                    ${cluster.members.map(m => `
+                        <div class="cluster-member">
+                            <span class="rag-dot ${m.state && m.state.toLowerCase() === 'active' ? 'green' : m.state && m.state.toLowerCase() === 'standby' ? 'amber' : 'red'}"></span>
+                            ${m.name} (${m.locality})
+                            <span class="state ${(m.state || '').toLowerCase()}">${m.state || '—'}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            ` : ''}
+
+            ${topIfaces.length > 0 ? `
+                <div class="section-label">Interfaces</div>
+                <table class="iface-table">
+                    <tr>
+                        <th>Name</th>
+                        <th>RX</th>
+                        <th>TX</th>
+                        <th>Err</th>
+                    </tr>
+                    ${topIfaces.map(i => `
+                        <tr>
+                            <td>${i.name}</td>
+                            <td>${fmtBytes(i.rx_bytes)}</td>
+                            <td>${fmtBytes(i.tx_bytes)}</td>
+                            <td>${(i.rx_errors || 0) + (i.tx_errors || 0)}</td>
+                        </tr>
+                    `).join('')}
+                </table>
+            ` : ''}
+
+            <div class="data-source">Source: ${sourceLabel}</div>
+        </div>
+    `;
+}
+
+async function refresh() {
+    try {
+        const resp = await fetch('/api/status');
+        const data = await resp.json();
+
+        const dashboard = document.getElementById('dashboard');
+        let html = '';
+
+        // Management card
+        if (data.mgmt && Object.keys(data.mgmt).length > 0) {
+            html += renderMgmtCard(data.mgmt, data.gateways);
+        }
+
+        // Gateway cards
+        if (data.gateways) {
+            for (const [name, gw] of Object.entries(data.gateways)) {
+                html += renderGwCard(name, gw);
+            }
+        }
+
+        if (html) {
+            dashboard.innerHTML = html;
+        }
+
+        // Update header
+        const statusEl = document.getElementById('collector-status');
+        const cs = data.collector_status || {};
+        let statusHtml = '';
+        for (const [name, status] of Object.entries(cs)) {
+            const dotClass = status === 'ok' ? 'ok' : status === 'idle' ? 'ok' : status.startsWith('error') ? 'error' : 'starting';
+            statusHtml += `<span class="status-dot ${dotClass}"></span>${name} `;
+        }
+        statusEl.innerHTML = statusHtml;
+
+        const updateEl = document.getElementById('last-update');
+        if (data.last_update) {
+            const d = new Date(data.last_update);
+            updateEl.textContent = 'Updated ' + d.toLocaleTimeString();
+        }
+    } catch (e) {
+        console.error('Refresh failed:', e);
+    }
+}
+
+// Initial load and periodic refresh
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+
+</body>
+</html>
