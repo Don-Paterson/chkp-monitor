@@ -2,7 +2,7 @@
 .SYNOPSIS
     chkp-monitor bootstrap script
     Run on a fresh Skillable lab A-GUI to install dependencies,
-    create monitoring accounts, and launch the health dashboard.
+    configure API access, create monitoring accounts, and launch the health dashboard.
 
 .USAGE
     irm https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/main/bootstrap.ps1 | iex
@@ -16,6 +16,7 @@ $REPO_URL      = "https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/ma
 $INSTALL_DIR   = "C:\chkp-monitor"
 $PYTHON_URL    = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
 $PS7_URL       = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.msi"
+$PLINK         = "C:\Program Files\PuTTY\plink.exe"
 
 # Lab defaults
 $MGMT_HOST     = "10.1.1.101"
@@ -26,6 +27,7 @@ $GAIA_ADMIN    = "admin"
 $LAB_PASSWORD  = 'Chkp!234'
 $MONITOR_USER  = "monitor-api"
 $MONITOR_PASS  = 'M0n!t0r@pi'
+$GAIA_MON_USER = "gaia_monitor_api"
 
 Write-Host ""
 Write-Host "====================================" -ForegroundColor Cyan
@@ -33,8 +35,42 @@ Write-Host "  chkp-monitor bootstrap" -ForegroundColor Cyan
 Write-Host "====================================" -ForegroundColor Cyan
 Write-Host ""
 
+# ---- Helper: run command on remote host via plink ----
+function Invoke-Plink {
+    param(
+        [string]$Host_,
+        [string]$User,
+        [string]$Password,
+        [string]$Command
+    )
+    $output = & $PLINK -ssh -l $User -pw $Password -batch $Host_ $Command 2>&1
+    return ($output | Out-String).Trim()
+}
+
+# ---- Helper: run multiple commands via plink stdin (for interactive sequences) ----
+function Invoke-PlinkScript {
+    param(
+        [string]$Host_,
+        [string]$User,
+        [string]$Password,
+        [string[]]$Commands
+    )
+    $script = ($Commands -join "`n") + "`nexit`n"
+    $output = $script | & $PLINK -ssh -l $User -pw $Password -batch $Host_ 2>&1
+    return ($output | Out-String).Trim()
+}
+
+# ---- Step 0: Accept SSH host keys ----
+Write-Host "[0/8] Accepting SSH host keys..." -ForegroundColor Yellow
+foreach ($h in @($MGMT_HOST, $GW01_HOST, $GW02_HOST)) {
+    # Pipe 'y' to auto-accept the host key on first connection
+    $result = "y" | & $PLINK -ssh -l $GAIA_ADMIN -pw $LAB_PASSWORD $h "exit" 2>&1
+    Write-Host "  Key cached for $h" -ForegroundColor Green
+}
+Start-Sleep -Seconds 1
+
 # ---- Step 1: Install Python ----
-Write-Host "[1/7] Checking Python..." -ForegroundColor Yellow
+Write-Host "[1/8] Checking Python..." -ForegroundColor Yellow
 $pythonInstalled = $false
 try {
     $pyVer = & python --version 2>&1
@@ -63,7 +99,7 @@ if (-not $pythonInstalled) {
 }
 
 # ---- Step 2: Install PowerShell 7 (optional) ----
-Write-Host "[2/7] Checking PowerShell 7..." -ForegroundColor Yellow
+Write-Host "[2/8] Checking PowerShell 7..." -ForegroundColor Yellow
 $ps7Path = "C:\Program Files\PowerShell\7\pwsh.exe"
 if (Test-Path $ps7Path) {
     Write-Host "  PowerShell 7 already installed" -ForegroundColor Green
@@ -84,13 +120,13 @@ if (Test-Path $ps7Path) {
 }
 
 # ---- Step 3: Install Python packages ----
-Write-Host "[3/7] Installing Python packages..." -ForegroundColor Yellow
+Write-Host "[3/8] Installing Python packages..." -ForegroundColor Yellow
 & python -m pip install --quiet --upgrade pip 2>$null
 & python -m pip install --quiet flask requests paramiko 2>$null
 Write-Host "  Flask, requests, paramiko installed" -ForegroundColor Green
 
 # ---- Step 4: Download chkp-monitor files ----
-Write-Host "[4/7] Downloading chkp-monitor..." -ForegroundColor Yellow
+Write-Host "[4/8] Downloading chkp-monitor..." -ForegroundColor Yellow
 
 if (Test-Path $INSTALL_DIR) {
     Remove-Item -Recurse -Force $INSTALL_DIR
@@ -118,113 +154,120 @@ foreach ($file in $files) {
 
 Write-Host "  Files downloaded to $INSTALL_DIR" -ForegroundColor Green
 
-# ---- Step 5: Create monitor-api account on A-SMS ----
-Write-Host "[5/7] Creating monitor-api account on A-SMS..." -ForegroundColor Yellow
-
-# Ignore SSL cert errors for self-signed Check Point certs
-# Skip SSL cert validation (self-signed Check Point certs) - PS7 compatible
-$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true
-$PSDefaultParameterValues['Invoke-WebRequest:SkipCertificateCheck'] = $true
-$mgmtApiBase = "https://${MGMT_HOST}/web_api"
+# ---- Step 5: Configure Management API on A-SMS ----
+Write-Host "[5/8] Configuring Management API on A-SMS ($MGMT_HOST)..." -ForegroundColor Yellow
 
 try {
-    # Login as cpadmin
-    $loginBody = @{
-        user = $MGMT_ADMIN
-        password = $LAB_PASSWORD
-    } | ConvertTo-Json
+    # 5a: Create monitor-api administrator (read-only)
+    Write-Host "  Creating $MONITOR_USER administrator..." -ForegroundColor White
+    $cmd = "mgmt_cli -r true add administrator name `"$MONITOR_USER`" password `"$MONITOR_PASS`" must-change-password false permissions-profile `"Read Only All`" --format json"
+    $result = Invoke-Plink -Host_ $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $cmd
 
-    $loginResp = Invoke-RestMethod -Uri "$mgmtApiBase/login" -Method Post `
-        -Body $loginBody -ContentType "application/json"
-    $sid = $loginResp.sid
-    $headers = @{ "X-chkp-sid" = $sid }
-
-    # Check if monitor-api already exists
-    $existsCheck = $true
-    try {
-        $existing = Invoke-RestMethod -Uri "$mgmtApiBase/show-administrator" -Method Post `
-            -Body (@{ name = $MONITOR_USER } | ConvertTo-Json) `
-            -ContentType "application/json" -Headers $headers
-    } catch {
-        $existsCheck = $false
-    }
-
-    if (-not $existsCheck) {
-        # Create read-only administrator
-        $addBody = @{
-            name = $MONITOR_USER
-            password = $MONITOR_PASS
-            "authentication-method" = "check point password"
-            "permissions-profile" = "Read Only All"
-        } | ConvertTo-Json
-
-        $addResp = Invoke-RestMethod -Uri "$mgmtApiBase/add-administrator" -Method Post `
-            -Body $addBody -ContentType "application/json" -Headers $headers
-
-        # Publish
-        Invoke-RestMethod -Uri "$mgmtApiBase/publish" -Method Post `
-            -Body "{}" -ContentType "application/json" -Headers $headers | Out-Null
-
-        Write-Host "  monitor-api admin created on A-SMS" -ForegroundColor Green
+    if ($result -match "already exists") {
+        Write-Host "  $MONITOR_USER already exists on A-SMS" -ForegroundColor Green
+    } elseif ($result -match '"uid"') {
+        Write-Host "  $MONITOR_USER created on A-SMS" -ForegroundColor Green
     } else {
-        Write-Host "  monitor-api admin already exists on A-SMS" -ForegroundColor Green
+        Write-Host "  add administrator output: $($result.Substring(0, [Math]::Min(300, $result.Length)))" -ForegroundColor Yellow
     }
 
-    # Logout
-    Invoke-RestMethod -Uri "$mgmtApiBase/logout" -Method Post `
-        -Body "{}" -ContentType "application/json" -Headers $headers | Out-Null
+    # 5b: Open management API to all IP addresses
+    Write-Host "  Setting API access to all IP addresses..." -ForegroundColor White
+    $cmd2 = "mgmt_cli -r true set api-settings accepted-api-calls-from `"All IP addresses`" --format json"
+    $result2 = Invoke-Plink -Host_ $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $cmd2
+    Write-Host "  API access configured" -ForegroundColor Green
+
+    # 5c: Publish
+    Write-Host "  Publishing changes..." -ForegroundColor White
+    $cmd3 = "mgmt_cli -r true publish --format json"
+    $result3 = Invoke-Plink -Host_ $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $cmd3
+    Write-Host "  Published" -ForegroundColor Green
+
+    # 5d: Restart API to apply accepted-api-calls-from change
+    Write-Host "  Restarting management API (may take up to 2 minutes)..." -ForegroundColor White
+    $cmd4 = "api restart"
+    $result4 = Invoke-Plink -Host_ $MGMT_HOST -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $cmd4
+    Write-Host "  Management API restart initiated" -ForegroundColor Green
 
 } catch {
-    Write-Host "  Warning: Could not create monitor-api on A-SMS: $_" -ForegroundColor Red
-    Write-Host "  You may need to create it manually or use cpadmin credentials" -ForegroundColor Yellow
+    Write-Host "  Warning: Management API setup issue: $_" -ForegroundColor Red
+    Write-Host "  Manual fix: SSH to A-SMS and run the mgmt_cli commands from the README" -ForegroundColor Yellow
 }
 
-# ---- Step 6: Create monitor-api on gateways (Gaia API) ----
-Write-Host "[6/7] Creating monitor-api accounts on gateways..." -ForegroundColor Yellow
+# ---- Step 6: Wait for Management API to come back ----
+Write-Host "[6/8] Waiting for Management API to be ready..." -ForegroundColor Yellow
+
+# Skip certificate check for self-signed certs (PS7 compatible)
+$PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true
+
+$mgmtReady = $false
+for ($i = 1; $i -le 30; $i++) {
+    try {
+        $testBody = @{ user = $MONITOR_USER; password = $MONITOR_PASS } | ConvertTo-Json
+        $testResp = Invoke-RestMethod -Uri "https://${MGMT_HOST}/web_api/login" -Method Post `
+            -Body $testBody -ContentType "application/json" -TimeoutSec 5
+        if ($testResp.sid) {
+            # Logout cleanly
+            $logoutHeaders = @{ "X-chkp-sid" = $testResp.sid }
+            Invoke-RestMethod -Uri "https://${MGMT_HOST}/web_api/logout" -Method Post `
+                -Body "{}" -ContentType "application/json" -Headers $logoutHeaders -TimeoutSec 5 | Out-Null
+            $mgmtReady = $true
+            break
+        }
+    } catch {}
+    Write-Host "  Waiting... ($i/30)" -ForegroundColor White
+    Start-Sleep -Seconds 10
+}
+
+if ($mgmtReady) {
+    Write-Host "  Management API is ready and accepting remote connections" -ForegroundColor Green
+} else {
+    Write-Host "  Management API not responding yet - dashboard will keep retrying" -ForegroundColor Yellow
+}
+
+# ---- Step 7: Create Gaia API users on gateways ----
+Write-Host "[7/8] Configuring Gaia API users on gateways..." -ForegroundColor Yellow
 
 foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
     $gwName = if ($gwHost -eq $GW01_HOST) { "A-GW-01" } else { "A-GW-02" }
-    $gaiaBase = "https://${gwHost}/gaia_api"
 
     try {
-        # Login as admin
-        $loginBody = @{
-            user = $GAIA_ADMIN
-            password = $LAB_PASSWORD
-        } | ConvertTo-Json
+        # 7a: Create user and set password via Clish
+        Write-Host "  [$gwName] Creating user $GAIA_MON_USER..." -ForegroundColor White
+        $clishCommands = @(
+            "add user $GAIA_MON_USER uid 0 homedir /home/$GAIA_MON_USER"
+            "set user $GAIA_MON_USER password"
+            "$LAB_PASSWORD"
+            "$LAB_PASSWORD"
+            "add rba user $GAIA_MON_USER roles adminRole"
+        )
+        $result = Invoke-PlinkScript -Host_ $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Commands $clishCommands
 
-        $loginResp = Invoke-RestMethod -Uri "$gaiaBase/login" -Method Post `
-            -Body $loginBody -ContentType "application/json"
-        $sid = $loginResp.sid
-        $headers = @{ "X-chkp-sid" = $sid }
+        if ($result -match "already exists") {
+            Write-Host "  [$gwName] User already exists" -ForegroundColor Green
+        } else {
+            Write-Host "  [$gwName] User created" -ForegroundColor Green
+        }
 
-        # Try to add user via run-script (Gaia doesn't have a dedicated add-user API in all versions)
-        $script = "clish -c 'add user $MONITOR_USER uid 0 homedir /home/$MONITOR_USER' 2>/dev/null; " +
-                  "clish -c 'set user $MONITOR_USER password-hash `$(openssl passwd -6 `"$MONITOR_PASS`")' 2>/dev/null; " +
-                  "clish -c 'add rba user $MONITOR_USER roles adminRole' 2>/dev/null; " +
-                  "echo 'done'"
-
-        $scriptBody = @{
-            script = $script
-        } | ConvertTo-Json
-
-        $scriptResp = Invoke-RestMethod -Uri "$gaiaBase/run-script" -Method Post `
-            -Body $scriptBody -ContentType "application/json" -Headers $headers
-
-        Write-Host "  monitor-api user configured on $gwName" -ForegroundColor Green
-
-        # Logout
-        Invoke-RestMethod -Uri "$gaiaBase/logout" -Method Post `
-            -Body "{}" -ContentType "application/json" -Headers $headers | Out-Null
+        # 7b: Enable Gaia API access (requires expert mode)
+        Write-Host "  [$gwName] Enabling Gaia API access..." -ForegroundColor White
+        $expertCommands = @(
+            "expert"
+            "$LAB_PASSWORD"
+            "gaia_api access --user $GAIA_MON_USER --enable true"
+            "exit"
+        )
+        $result2 = Invoke-PlinkScript -Host_ $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Commands $expertCommands
+        Write-Host "  [$gwName] Gaia API access enabled" -ForegroundColor Green
 
     } catch {
-        Write-Host "  Warning: Could not configure monitor-api on ${gwName}: $_" -ForegroundColor Red
-        Write-Host "  Falling back to admin credentials for this gateway" -ForegroundColor Yellow
+        Write-Host "  Warning: Could not configure $GAIA_MON_USER on ${gwName}: $_" -ForegroundColor Red
+        Write-Host "  Manual fix: SSH to $gwHost and create user with Gaia API access" -ForegroundColor Yellow
     }
 }
 
-# ---- Step 7: Create credentials.json and launch ----
-Write-Host "[7/7] Creating credentials and launching..." -ForegroundColor Yellow
+# ---- Step 8: Create credentials.json and launch ----
+Write-Host "[8/8] Creating credentials and launching..." -ForegroundColor Yellow
 
 $credentials = @{
     management = @{
@@ -232,8 +275,8 @@ $credentials = @{
         password = $MONITOR_PASS
     }
     gaia = @{
-        user = $MONITOR_USER
-        password = $MONITOR_PASS
+        user = $GAIA_MON_USER
+        password = $LAB_PASSWORD
     }
     bootstrap = @{
         mgmt_admin_user = $MGMT_ADMIN
@@ -252,6 +295,9 @@ Write-Host "====================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Location:  $INSTALL_DIR" -ForegroundColor White
 Write-Host "  Dashboard: http://localhost:8080" -ForegroundColor White
+Write-Host ""
+Write-Host "  Mgmt API user:  $MONITOR_USER / $MONITOR_PASS" -ForegroundColor White
+Write-Host "  Gaia API user:  $GAIA_MON_USER / $LAB_PASSWORD" -ForegroundColor White
 Write-Host ""
 Write-Host "Starting dashboard..." -ForegroundColor Yellow
 Write-Host "(Press Ctrl+C to stop)" -ForegroundColor Gray
