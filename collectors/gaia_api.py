@@ -1,9 +1,10 @@
 """
 Tier 3 - Gaia API Collector (Primary)
-Polls each gateway via Gaia REST API /run-script endpoint.
-Collects: CPU, memory, disk, connections, drops, ClusterXL state,
-kernel memory, interface stats.
+Polls each gateway via Gaia REST API.
+Flow: run-script -> get task-id -> show-task -> decode base64 output -> parse.
+Parsers matched to actual R82 output formats.
 """
+import base64
 import re
 import time
 import logging
@@ -20,11 +21,10 @@ class GaiaApiCollector:
         self.gateways = config["gateways"]
         self.user = credentials["gaia"]["user"]
         self.password = credentials["gaia"]["password"]
-        self.sessions = {}  # gateway_name -> {sid, last_login}
+        self.sessions = {}
         self.session_lifetime = 500
 
     def _login(self, gw: dict) -> str | None:
-        """Authenticate to a gateway's Gaia API."""
         name = gw["name"]
         url = f"https://{gw['mgmt_ip']}:{gw['gaia_port']}/gaia_api/login"
         try:
@@ -45,172 +45,202 @@ class GaiaApiCollector:
             return None
 
     def _ensure_session(self, gw: dict) -> str | None:
-        """Return a valid session ID for the gateway."""
         name = gw["name"]
         session = self.sessions.get(name)
         if session and (time.time() - session["last_login"]) < self.session_lifetime:
             return session["sid"]
         return self._login(gw)
 
-    def _run_script(self, gw: dict, script: str) -> str | None:
-        """Execute a script on the gateway via Gaia API /run-script."""
+    def _api_post(self, gw: dict, endpoint: str, payload: dict) -> dict | None:
         sid = self._ensure_session(gw)
         if not sid:
             return None
-
-        url = f"https://{gw['mgmt_ip']}:{gw['gaia_port']}/gaia_api/run-script"
+        url = f"https://{gw['mgmt_ip']}:{gw['gaia_port']}/gaia_api/{endpoint}"
         try:
             resp = requests.post(
                 url,
-                json={"script": script},
+                json=payload,
                 headers={"X-chkp-sid": sid},
                 verify=False,
                 timeout=30,
             )
             resp.raise_for_status()
-            data = resp.json()
-            output = data.get("tasks", [{}])
-            if output:
-                task = output[0] if isinstance(output, list) else output
-                return task.get("task-details", [{}])[0].get("statusDescription", "")
-            return data.get("output", "")
+            return resp.json()
         except Exception as e:
-            logger.error(f"run-script on {gw['name']} failed: {e}")
+            logger.error(f"Gaia API {endpoint} on {gw['name']} failed: {e}")
             if hasattr(e, "response") and e.response is not None:
                 if e.response.status_code in (401, 403):
                     self.sessions.pop(gw["name"], None)
             return None
 
-    def _run_script_simple(self, gw: dict, script: str) -> str | None:
-        """
-        Execute a script, handling both task-based and direct response formats.
-        The Gaia API may return results in different structures depending on version.
-        """
-        sid = self._ensure_session(gw)
-        if not sid:
+    def _run_script(self, gw: dict, script: str) -> str | None:
+        """Execute a script via Gaia API async flow: run-script -> show-task -> decode."""
+        result = self._api_post(gw, "run-script", {"script": script})
+        if not result:
             return None
 
-        url = f"https://{gw['mgmt_ip']}:{gw['gaia_port']}/gaia_api/run-script"
-        try:
-            resp = requests.post(
-                url,
-                json={"script": script},
-                headers={"X-chkp-sid": sid},
-                verify=False,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        task_id = result.get("task-id")
+        if not task_id:
+            logger.error(f"No task-id from run-script on {gw['name']}")
+            return None
 
-            # Try direct output first
-            if "output" in data:
-                return data["output"]
+        for attempt in range(15):
+            task_result = self._api_post(gw, "show-task", {"task-id": task_id})
+            if not task_result:
+                return None
 
-            # Task-based response
-            tasks = data.get("tasks", [])
-            if tasks:
-                task = tasks[0] if isinstance(tasks, list) else tasks
+            tasks = task_result.get("tasks", [])
+            if not tasks:
+                time.sleep(2)
+                continue
+
+            task = tasks[0]
+            progress = task.get("progress-description", "")
+            status = task.get("status", "")
+
+            if progress == "succeeded" or status == "succeeded":
                 details = task.get("task-details", [])
                 if details:
                     detail = details[0] if isinstance(details, list) else details
-                    return detail.get("statusDescription", "")
+                    b64_output = detail.get("output", "")
+                    if b64_output:
+                        try:
+                            return base64.b64decode(b64_output).decode("utf-8", errors="replace")
+                        except Exception as e:
+                            logger.error(f"Base64 decode failed on {gw['name']}: {e}")
+                return None
+            elif progress in ("failed", "partially succeeded") or status == "failed":
+                logger.error(f"Script failed on {gw['name']}: {progress}")
+                return None
+            time.sleep(2)
 
-            # Fallback: return raw JSON string for debugging
-            logger.warning(f"Unexpected run-script response from {gw['name']}: {list(data.keys())}")
-            return str(data)
-        except Exception as e:
-            logger.error(f"run-script on {gw['name']} failed: {e}")
-            if hasattr(e, "response") and e.response is not None:
-                if e.response.status_code in (401, 403):
-                    self.sessions.pop(gw["name"], None)
-            return None
+        logger.error(f"Script timed out on {gw['name']} (task-id: {task_id})")
+        return None
 
-    # ---- Parsers for command outputs ----
+    # ---- Parsers matched to actual R82 output ----
 
     def _parse_cpstat_os(self, output: str) -> dict:
-        """Parse cpstat os -f all output for CPU, memory, disk."""
-        result = {"cpu_percent": None, "memory_percent": None, "disk_percent": None,
-                  "cpu_idle": None, "memory_total_mb": None, "memory_used_mb": None,
-                  "disk_total_gb": None, "disk_used_gb": None}
+        """
+        Parse cpstat os -f all. Actual R82 fields:
+          CPU Usage (%):  2
+          CPU User Time (%):  1
+          CPU Idle Time (%):  99
+          Total Real Memory (Bytes):  8053116928
+          Active Real Memory (Bytes):  3513761792
+          Free Real Memory (Bytes):  4539355136
+          Disk Free Space (%):  90
+          Disk Total Space (Bytes):  107321753600
+        """
+        r = {
+            "cpu_percent": None, "cpu_user": None, "cpu_system": None, "cpu_idle": None,
+            "memory_percent": None, "memory_total_bytes": None, "memory_active_bytes": None,
+            "memory_free_bytes": None,
+            "disk_percent": None, "disk_free_percent": None, "disk_total_bytes": None,
+            "disk_free_bytes": None,
+            "cpus_number": None, "version": None,
+        }
         if not output:
-            return result
+            return r
 
-        # CPU: look for idle percentage
-        idle_match = re.search(r"CPU Idle[:\s]+(\d+\.?\d*)%?", output, re.IGNORECASE)
-        if idle_match:
-            idle = float(idle_match.group(1))
-            result["cpu_idle"] = idle
-            result["cpu_percent"] = round(100 - idle, 1)
+        def grab(pattern):
+            m = re.search(pattern, output)
+            return m.group(1) if m else None
 
-        # Also try "CPU User" + "CPU System" pattern
-        if result["cpu_percent"] is None:
-            user_match = re.search(r"CPU User[:\s]+(\d+\.?\d*)%?", output, re.IGNORECASE)
-            sys_match = re.search(r"CPU System[:\s]+(\d+\.?\d*)%?", output, re.IGNORECASE)
-            if user_match and sys_match:
-                result["cpu_percent"] = round(float(user_match.group(1)) + float(sys_match.group(1)), 1)
+        r["version"] = grab(r"SVN Foundation Version String:\s+(\S+)")
+        r["cpu_percent"] = int(v) if (v := grab(r"CPU Usage \(%\):\s+(\d+)")) else None
+        r["cpu_user"] = int(v) if (v := grab(r"CPU User Time \(%\):\s+(\d+)")) else None
+        r["cpu_system"] = int(v) if (v := grab(r"CPU System Time \(%\):\s+(\d+)")) else None
+        r["cpu_idle"] = int(v) if (v := grab(r"CPU Idle Time \(%\):\s+(\d+)")) else None
+        r["cpus_number"] = int(v) if (v := grab(r"CPUs Number:\s+(\d+)")) else None
 
-        # Memory: look for total and used/free
-        mem_total = re.search(r"Total (?:Real |Physical )?Memory[:\s]+(\d+)", output, re.IGNORECASE)
-        mem_used = re.search(r"(?:Active|Used) (?:Real |Physical )?Memory[:\s]+(\d+)", output, re.IGNORECASE)
-        mem_free = re.search(r"Free (?:Real |Physical )?Memory[:\s]+(\d+)", output, re.IGNORECASE)
+        total_str = grab(r"Total Real Memory \(Bytes\):\s+(\d+)")
+        active_str = grab(r"Active Real Memory \(Bytes\):\s+(\d+)")
+        free_str = grab(r"Free Real Memory \(Bytes\):\s+(\d+)")
 
-        if mem_total:
-            total = int(mem_total.group(1))
-            result["memory_total_mb"] = total
-            if mem_used:
-                used = int(mem_used.group(1))
-                result["memory_used_mb"] = used
-                result["memory_percent"] = round((used / total) * 100, 1) if total > 0 else 0
-            elif mem_free:
-                free = int(mem_free.group(1))
-                result["memory_used_mb"] = total - free
-                result["memory_percent"] = round(((total - free) / total) * 100, 1) if total > 0 else 0
+        if total_str:
+            total = int(total_str)
+            r["memory_total_bytes"] = total
+            if active_str:
+                active = int(active_str)
+                r["memory_active_bytes"] = active
+                r["memory_percent"] = round((active / total) * 100, 1) if total > 0 else 0
+            elif free_str:
+                free = int(free_str)
+                r["memory_free_bytes"] = free
+                r["memory_percent"] = round(((total - free) / total) * 100, 1) if total > 0 else 0
 
-        # Disk: look for partition usage
-        disk_match = re.search(r"/\s+\d+\s+\d+\s+\d+\s+(\d+)%", output)
-        if disk_match:
-            result["disk_percent"] = int(disk_match.group(1))
+        disk_free_pct = grab(r"Disk Free Space \(%\):\s+(\d+)")
+        if disk_free_pct:
+            r["disk_free_percent"] = int(disk_free_pct)
+            r["disk_percent"] = 100 - int(disk_free_pct)
 
-        # Alternative disk parsing from cpstat output
-        disk_cap = re.search(r"Disk Capacity[:\s]+(\d+)", output, re.IGNORECASE)
-        disk_used_match = re.search(r"Disk Used[:\s]+(\d+)%?", output, re.IGNORECASE)
-        if disk_used_match:
-            result["disk_percent"] = int(disk_used_match.group(1))
+        r["disk_total_bytes"] = int(v) if (v := grab(r"Disk Total Space \(Bytes\):\s+(\d+)")) else None
+        r["disk_free_bytes"] = int(v) if (v := grab(r"Disk Total Free Space \(Bytes\):\s+(\d+)")) else None
 
-        return result
+        return r
 
     def _parse_cpstat_fw(self, output: str) -> dict:
-        """Parse cpstat fw -f all output for connections, packets, drops."""
-        result = {"connections_current": None, "connections_peak": None,
-                  "packets_total": None, "drops_total": None,
-                  "packets_accepted": None, "packets_dropped": None,
-                  "packets_logged": None}
+        """
+        Parse cpstat fw -f all. Actual R82 fields:
+          Num. connections:  26
+          Peak num. connections:  581
+          Connections capacity limit:  0
+          Total accepted packets:  2435257
+          Interface table with per-interface Accept/Drop/Reject/Log
+          Totals row:  |    |   | 71127|15355|     0|19139|
+          kmem - bytes used:  503247099
+          kmem - bytes peak:  533816308
+        """
+        r = {
+            "connections_current": None, "connections_peak": None,
+            "connections_limit": None,
+            "packets_accepted": None, "packets_dropped": None,
+            "packets_rejected": None, "packets_logged": None,
+            "drops_total": None,
+            "per_interface": [],
+            "kmem_bytes_used": None, "kmem_bytes_peak": None,
+        }
         if not output:
-            return result
+            return r
 
-        # Current connections
-        conn_match = re.search(r"(?:Num\. )?Connections[:\s]+(\d+)", output, re.IGNORECASE)
-        if conn_match:
-            result["connections_current"] = int(conn_match.group(1))
+        def grab(pattern):
+            m = re.search(pattern, output)
+            return m.group(1) if m else None
 
-        peak_match = re.search(r"Peak[:\s]+(\d+)", output, re.IGNORECASE)
-        if peak_match:
-            result["connections_peak"] = int(peak_match.group(1))
+        r["connections_current"] = int(v) if (v := grab(r"Num\. connections:\s+(\d+)")) else None
+        r["connections_peak"] = int(v) if (v := grab(r"Peak num\. connections:\s+(\d+)")) else None
+        r["connections_limit"] = int(v) if (v := grab(r"Connections capacity limit:\s+(\d+)")) else None
+        r["packets_accepted"] = int(v) if (v := grab(r"Total accepted packets:\s+(\d+)")) else None
 
-        # Packets
-        accepted = re.search(r"(?:Packets )?Accepted[:\s]+(\d+)", output, re.IGNORECASE)
-        dropped = re.search(r"(?:Packets )?Dropped[:\s]+(\d+)", output, re.IGNORECASE)
-        logged = re.search(r"(?:Packets )?Logged[:\s]+(\d+)", output, re.IGNORECASE)
+        # Totals row from interface table: |    |   | 71127|15355|     0|19139|
+        totals = re.search(r"\|\s+\|\s+\|\s*(\d+)\|\s*(\d+)\|\s*(\d+)\|\s*(\d+)\|", output)
+        if totals:
+            r["packets_accepted"] = r["packets_accepted"] or int(totals.group(1))
+            r["drops_total"] = int(totals.group(2))
+            r["packets_dropped"] = int(totals.group(2))
+            r["packets_rejected"] = int(totals.group(3))
+            r["packets_logged"] = int(totals.group(4))
 
-        if accepted:
-            result["packets_accepted"] = int(accepted.group(1))
-        if dropped:
-            result["packets_dropped"] = int(dropped.group(1))
-            result["drops_total"] = int(dropped.group(1))
-        if logged:
-            result["packets_logged"] = int(logged.group(1))
+        # Per-interface stats from the first interface table
+        iface_pattern = re.finditer(
+            r"\|(\w+)\s*\|(in|out)\s*\|\s*(\d+)\|\s*(\d+)\|\s*(\d+)\|\s*(\d+)\|",
+            output
+        )
+        for m in iface_pattern:
+            r["per_interface"].append({
+                "name": m.group(1),
+                "direction": m.group(2),
+                "accept": int(m.group(3)),
+                "drop": int(m.group(4)),
+                "reject": int(m.group(5)),
+                "log": int(m.group(6)),
+            })
 
-        return result
+        # Kernel memory from cpstat fw output
+        r["kmem_bytes_used"] = int(v) if (v := grab(r"kmem - bytes used:\s+(\d+)")) else None
+        r["kmem_bytes_peak"] = int(v) if (v := grab(r"kmem - bytes peak:\s+(\d+)")) else None
+
+        return r
 
     def _parse_cphaprob(self, output: str) -> dict:
         """Parse cphaprob stat output for ClusterXL state."""
@@ -218,10 +248,6 @@ class GaiaApiCollector:
         if not output:
             return result
 
-        # Look for local and remote member states
-        # Typical format:
-        # Member_A(local):  Active
-        # Member_B(remote): Standby
         member_pattern = re.finditer(
             r"(\S+?)\s*\((local|remote)\)\s*[:\-]\s*(Active|Standby|Down|Ready|Initializing)",
             output, re.IGNORECASE
@@ -233,84 +259,148 @@ class GaiaApiCollector:
                 "state": m.group(3),
             })
 
-        # Determine overall cluster state from local member
         for member in result["members"]:
             if member["locality"] == "local":
                 result["cluster_state"] = member["state"]
                 break
 
-        # Fallback: look for simple "active" or "standby" keywords
         if result["cluster_state"] == "unknown":
-            if re.search(r"\bActive\b", output, re.IGNORECASE):
+            if re.search(r"\bActive\b", output):
                 result["cluster_state"] = "Active"
-            elif re.search(r"\bStandby\b", output, re.IGNORECASE):
+            elif re.search(r"\bStandby\b", output):
                 result["cluster_state"] = "Standby"
 
         return result
 
     def _parse_fw_ctl_pstat(self, output: str) -> dict:
-        """Parse fw ctl pstat output for kernel memory stats."""
-        result = {"kernel_memory_used_percent": None, "kernel_memory_total": None,
-                  "kernel_memory_used": None, "kernel_memory_peak": None,
-                  "hash_memory_used_percent": None, "conns_memory_used_percent": None}
+        """
+        Parse fw ctl pstat. Actual R82 format:
+          Physical memory used:  26% (1718 MB out of 6528 MB) - below watermark
+          Kernel   memory used:   6% (402 MB out of 6528 MB) - below watermark
+          Virtual  memory used:  20% (1315 MB out of 6528 MB) - below watermark
+          Total memory  bytes  used: 503250451   peak: 533816308
+          Concurrent Connections: 27 (Unlimited)
+          27 concurrent, 581 peak concurrent
+        """
+        r = {
+            "physical_memory_pct": None, "physical_memory_used_mb": None, "physical_memory_total_mb": None,
+            "kernel_memory_used_percent": None, "kernel_memory_used_mb": None, "kernel_memory_total_mb": None,
+            "virtual_memory_pct": None, "virtual_memory_used_mb": None, "virtual_memory_total_mb": None,
+            "kernel_memory_total": None, "kernel_memory_used": None, "kernel_memory_peak": None,
+            "connections_concurrent": None, "connections_peak": None,
+            "watermark_status": None,
+        }
         if not output:
-            return result
+            return r
 
-        # Kernel memory block
-        # Example: Total memory bytes used: 12345678, Total memory bytes available: 87654321
-        total_match = re.search(r"Total (?:memory )?bytes? (?:available|allocated)[:\s]+(\d+)", output, re.IGNORECASE)
-        used_match = re.search(r"Total (?:memory )?bytes? used[:\s]+(\d+)", output, re.IGNORECASE)
-        peak_match = re.search(r"Peak (?:memory )?bytes? used[:\s]+(\d+)", output, re.IGNORECASE)
+        # Physical memory used:  26% (1718 MB out of 6528 MB) - below watermark
+        phys = re.search(r"Physical memory used:\s+(\d+)%\s+\((\d+)\s+MB\s+out of\s+(\d+)\s+MB\)\s+-\s+(\w+\s+\w+)", output)
+        if phys:
+            r["physical_memory_pct"] = int(phys.group(1))
+            r["physical_memory_used_mb"] = int(phys.group(2))
+            r["physical_memory_total_mb"] = int(phys.group(3))
 
-        if total_match and used_match:
-            total = int(total_match.group(1))
-            used = int(used_match.group(1))
-            result["kernel_memory_total"] = total
-            result["kernel_memory_used"] = used
-            result["kernel_memory_used_percent"] = round((used / total) * 100, 1) if total > 0 else 0
+        # Kernel memory used:   6% (402 MB out of 6528 MB) - below watermark
+        kern = re.search(r"Kernel\s+memory used:\s+(\d+)%\s+\((\d+)\s+MB\s+out of\s+(\d+)\s+MB\)\s+-\s+(\w+\s+\w+)", output)
+        if kern:
+            r["kernel_memory_used_percent"] = int(kern.group(1))
+            r["kernel_memory_used_mb"] = int(kern.group(2))
+            r["kernel_memory_total_mb"] = int(kern.group(3))
+            r["watermark_status"] = kern.group(4).strip()
 
-        if peak_match:
-            result["kernel_memory_peak"] = int(peak_match.group(1))
+        # Virtual memory used:  20% (1315 MB out of 6528 MB)
+        virt = re.search(r"Virtual\s+memory used:\s+(\d+)%\s+\((\d+)\s+MB\s+out of\s+(\d+)\s+MB\)", output)
+        if virt:
+            r["virtual_memory_pct"] = int(virt.group(1))
+            r["virtual_memory_used_mb"] = int(virt.group(2))
+            r["virtual_memory_total_mb"] = int(virt.group(3))
 
-        # Hash memory
-        hash_total = re.search(r"Total (?:hash )?memory[:\s]+(\d+)", output, re.IGNORECASE)
-        hash_used = re.search(r"(?:hash )?memory used[:\s]+(\d+)", output, re.IGNORECASE)
-        if hash_total and hash_used:
-            ht = int(hash_total.group(1))
-            hu = int(hash_used.group(1))
-            result["hash_memory_used_percent"] = round((hu / ht) * 100, 1) if ht > 0 else 0
+        # Total memory bytes used: 503250451   peak: 533816308
+        raw_mem = re.search(r"Total memory\s+bytes\s+used:\s+(\d+)\s+peak:\s+(\d+)", output)
+        if raw_mem:
+            r["kernel_memory_used"] = int(raw_mem.group(1))
+            r["kernel_memory_peak"] = int(raw_mem.group(2))
+            # Use kernel summary total if available
+            if r["kernel_memory_total_mb"]:
+                r["kernel_memory_total"] = r["kernel_memory_total_mb"] * 1024 * 1024
 
-        return result
+        # Connections: 27 concurrent, 581 peak concurrent
+        conns = re.search(r"(\d+)\s+concurrent,\s+(\d+)\s+peak concurrent", output)
+        if conns:
+            r["connections_concurrent"] = int(conns.group(1))
+            r["connections_peak"] = int(conns.group(2))
 
-    def _parse_interfaces(self, output: str) -> list:
-        """Parse interface stats from clish or /proc/net/dev."""
+        return r
+
+    def _parse_interfaces_from_cpstat(self, output: str) -> list:
+        """
+        Parse interface config table from cpstat os -f all.
+        ONLY parse rows from the Interface configuration table, not Partitions or Processors.
+        """
         interfaces = []
         if not output:
             return interfaces
 
-        # Parse /proc/net/dev format
-        lines = output.strip().split("\n")
-        for line in lines:
-            # Skip header lines
-            if "Inter-" in line or "face" in line or "|" in line:
+        # Extract only the interface configuration table section
+        in_iface_table = False
+        for line in output.split("\n"):
+            if "Interface configuration table" in line:
+                in_iface_table = True
+                continue
+            if in_iface_table and ("Routing table" in line or "Processors load" in line or "Partitions space" in line):
+                break
+            if not in_iface_table:
+                continue
+            if not line.startswith("|") or "Name" in line or "---" in line:
                 continue
 
+            parts = [p.strip() for p in line.split("|") if p.strip()]
+            if len(parts) >= 5:
+                name = parts[0]
+                if name in ("lo",):
+                    continue
+                try:
+                    interfaces.append({
+                        "name": name,
+                        "address": parts[1],
+                        "mask": parts[2],
+                        "mtu": int(parts[3]),
+                        "state": int(parts[4]),
+                        "mac": parts[5] if len(parts) > 5 else "",
+                    })
+                except (ValueError, IndexError):
+                    continue
+
+        return interfaces
+
+    def _parse_proc_net_dev(self, output: str) -> list:
+        """Parse /proc/net/dev for traffic counters."""
+        interfaces = []
+        if not output:
+            return interfaces
+
+        for line in output.strip().split("\n"):
+            if "Inter-" in line or "face" in line or "|" in line:
+                continue
             parts = line.strip().split()
             if len(parts) >= 10 and ":" in parts[0]:
                 iface = parts[0].rstrip(":")
                 if iface in ("lo",):
                     continue
-                interfaces.append({
-                    "name": iface,
-                    "rx_bytes": int(parts[1]),
-                    "rx_packets": int(parts[2]),
-                    "rx_errors": int(parts[3]),
-                    "rx_drops": int(parts[4]),
-                    "tx_bytes": int(parts[9]) if len(parts) > 9 else 0,
-                    "tx_packets": int(parts[10]) if len(parts) > 10 else 0,
-                    "tx_errors": int(parts[11]) if len(parts) > 11 else 0,
-                    "tx_drops": int(parts[12]) if len(parts) > 12 else 0,
-                })
+                try:
+                    interfaces.append({
+                        "name": iface,
+                        "rx_bytes": int(parts[1]),
+                        "rx_packets": int(parts[2]),
+                        "rx_errors": int(parts[3]),
+                        "rx_drops": int(parts[4]),
+                        "tx_bytes": int(parts[9]),
+                        "tx_packets": int(parts[10]),
+                        "tx_errors": int(parts[11]),
+                        "tx_drops": int(parts[12]),
+                    })
+                except (ValueError, IndexError):
+                    continue
 
         return interfaces
 
@@ -329,30 +419,35 @@ class GaiaApiCollector:
         }
 
         # cpstat os -f all
-        os_output = self._run_script_simple(gw, "cpstat os -f all")
+        os_output = self._run_script(gw, "cpstat os -f all")
         if os_output is not None:
             result["gaia_api_reachable"] = True
             result["os"] = self._parse_cpstat_os(os_output)
+            result["interfaces"] = self._parse_interfaces_from_cpstat(os_output)
 
         # cpstat fw -f all
-        fw_output = self._run_script_simple(gw, "cpstat fw -f all")
+        fw_output = self._run_script(gw, "cpstat fw -f all")
         if fw_output is not None:
             result["firewall"] = self._parse_cpstat_fw(fw_output)
 
         # cphaprob stat
-        ha_output = self._run_script_simple(gw, "cphaprob stat")
+        ha_output = self._run_script(gw, "cphaprob stat")
         if ha_output is not None:
             result["cluster"] = self._parse_cphaprob(ha_output)
 
         # fw ctl pstat
-        pstat_output = self._run_script_simple(gw, "fw ctl pstat")
+        pstat_output = self._run_script(gw, "fw ctl pstat")
         if pstat_output is not None:
             result["kernel_memory"] = self._parse_fw_ctl_pstat(pstat_output)
 
-        # Interface stats via /proc/net/dev
-        iface_output = self._run_script_simple(gw, "cat /proc/net/dev")
-        if iface_output is not None:
-            result["interfaces"] = self._parse_interfaces(iface_output)
+        # /proc/net/dev for traffic counters
+        dev_output = self._run_script(gw, "cat /proc/net/dev")
+        if dev_output is not None:
+            traffic = self._parse_proc_net_dev(dev_output)
+            traffic_map = {t["name"]: t for t in traffic}
+            for iface in result["interfaces"]:
+                if iface["name"] in traffic_map:
+                    iface.update(traffic_map[iface["name"]])
 
         return result
 
