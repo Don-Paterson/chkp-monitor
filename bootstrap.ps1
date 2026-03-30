@@ -35,6 +35,7 @@ $LAB_PASSWORD  = 'Chkp!234'
 $MONITOR_USER  = "monitor-api"
 $MONITOR_PASS  = 'M0n!t0r@pi'
 $GAIA_MON_USER = "gaia_monitor_api"
+$GAIA_MON_PASS = 'M0n1t3r321'
 
 # Skip SSL cert validation for self-signed Check Point certs (PS7 compatible)
 $PSDefaultParameterValues['Invoke-RestMethod:SkipCertificateCheck'] = $true
@@ -275,9 +276,9 @@ if ($mgmtReady) {
 # ============================================================
 # Step 7: Create Gaia API users on gateways
 # ============================================================
-# Strategy: switch admin shell to bash, create user with
-# password hash (non-interactive), assign RBA role, enable
-# Gaia API access, save config, restore shell.
+# Strategy: switch admin shell to bash, create user (ignore if
+# exists), ALWAYS set password via echo pipe to clish, assign
+# RBA role, enable Gaia API access, save config, restore shell.
 # ============================================================
 Write-Host "[7/8] Configuring Gaia API users on gateways..." -ForegroundColor Yellow
 
@@ -289,20 +290,32 @@ foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
         Write-Host "  [$gwName] Switching to expert mode..." -ForegroundColor White
         Set-ExpertShell -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD
 
-        # 7b: Create user with password hash (non-interactive)
+        # 7b: Create user (ignore error if already exists)
         Write-Host "  [$gwName] Creating user $GAIA_MON_USER..." -ForegroundColor White
-        $hashCmd = "HASH=`$(openssl passwd -6 '$LAB_PASSWORD'); clish -c 'add user $GAIA_MON_USER uid 0 homedir /home/$GAIA_MON_USER' 2>&1; clish -c ""set user $GAIA_MON_USER password-hash `$HASH"" 2>&1; clish -c 'add rba user $GAIA_MON_USER roles adminRole' 2>&1; echo USER_DONE"
-        $userResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $hashCmd
+        $addCmd = "clish -c 'add user $GAIA_MON_USER uid 0 homedir /home/$GAIA_MON_USER' 2>&1 || true; echo ADD_DONE"
+        $addResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $addCmd
 
-        if ($userResult -match "already exists") {
-            Write-Host "  [$gwName] User already exists" -ForegroundColor Green
-        } elseif ($userResult -match "USER_DONE") {
-            Write-Host "  [$gwName] User created" -ForegroundColor Green
+        if ($addResult -match "already exists") {
+            Write-Host "  [$gwName] User already exists - will reset password" -ForegroundColor Green
         } else {
-            Write-Host "  [$gwName] User result: $($userResult.Substring(0, [Math]::Min(200, $userResult.Length)))" -ForegroundColor Yellow
+            Write-Host "  [$gwName] User created" -ForegroundColor Green
         }
 
-        # 7c: Enable Gaia API access
+        # 7c: Set password (always, whether user is new or existing)
+        Write-Host "  [$gwName] Setting password..." -ForegroundColor White
+        $pwCmd = "echo -e '$GAIA_MON_PASS\n$GAIA_MON_PASS' | clish -c 'set user $GAIA_MON_USER password' 2>&1; echo PW_DONE"
+        $pwResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $pwCmd
+
+        if ($pwResult -match "PW_DONE") {
+            Write-Host "  [$gwName] Password set" -ForegroundColor Green
+        } else {
+            Write-Host "  [$gwName] Password result: $($pwResult.Substring(0, [Math]::Min(200, $pwResult.Length)))" -ForegroundColor Yellow
+        }
+
+        # 7d: Assign RBA role (ignore error if already assigned)
+        $null = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "clish -c 'add rba user $GAIA_MON_USER roles adminRole' 2>&1 || true"
+
+        # 7e: Enable Gaia API access
         Write-Host "  [$gwName] Enabling Gaia API access..." -ForegroundColor White
         $gaiaCmd = "gaia_api access --user $GAIA_MON_USER --enable true 2>&1; echo GAIA_API_DONE"
         $gaiaResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command $gaiaCmd
@@ -313,7 +326,7 @@ foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
             Write-Host "  [$gwName] Gaia API result: $($gaiaResult.Substring(0, [Math]::Min(200, $gaiaResult.Length)))" -ForegroundColor Yellow
         }
 
-        # 7d: Save config and restore shell
+        # 7f: Save config and restore shell
         Write-Host "  [$gwName] Saving config and restoring shell..." -ForegroundColor White
         $null = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "clish -c 'save config' 2>&1"
         Set-ClishShell -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD
@@ -329,7 +342,7 @@ foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
 # ---- Step 8: Create credentials.json and launch ----
 Write-Host "[8/8] Creating credentials and launching..." -ForegroundColor Yellow
 
-$credJson = '{"management":{"user":"' + $MONITOR_USER + '","password":"' + $MONITOR_PASS + '"},"gaia":{"user":"' + $GAIA_MON_USER + '","password":"' + $LAB_PASSWORD + '"}}'
+$credJson = '{"management":{"user":"' + $MONITOR_USER + '","password":"' + $MONITOR_PASS + '"},"gaia":{"user":"' + $GAIA_MON_USER + '","password":"' + $GAIA_MON_PASS + '"}}'
 $credJson | Out-File -FilePath "$INSTALL_DIR\credentials.json" -Encoding ascii -NoNewline
 
 try {
