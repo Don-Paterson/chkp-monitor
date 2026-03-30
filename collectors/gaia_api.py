@@ -115,10 +115,15 @@ class GaiaApiCollector:
             logger.error(f"No task-id from run-script on {gw['name']}")
             return None
 
+        # Small delay before first show-task to let the task register
+        time.sleep(1)
+
         for attempt in range(15):
-            task_result = self._api_post(gw, "show-task", {"task-id": task_id})
-            if not task_result:
-                return None
+            task_result = self._show_task(gw, task_id)
+            if task_result is None:
+                # show-task failed (could be object_not_found), retry after delay
+                time.sleep(2)
+                continue
 
             tasks = task_result.get("tasks", [])
             if not tasks:
@@ -147,6 +152,39 @@ class GaiaApiCollector:
 
         logger.error(f"Script timed out on {gw['name']} (task-id: {task_id})")
         return None
+
+    def _show_task(self, gw: dict, task_id: str) -> dict | None:
+        """Call show-task, returning None on object_not_found (so caller can retry)."""
+        sid = self._ensure_session(gw)
+        if not sid:
+            return None
+        url = f"https://{gw['mgmt_ip']}:{gw['gaia_port']}/gaia_api/show-task"
+        try:
+            resp = requests.post(
+                url,
+                json={"task-id": task_id},
+                headers={"X-chkp-sid": sid},
+                verify=False,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text[:300]
+                except Exception:
+                    pass
+                # object_not_found means task isn't registered yet — retry
+                if "object_not_found" in body or "doesn't exist" in body:
+                    logger.debug(f"Task {task_id} not found yet on {gw['name']}, will retry")
+                    return None
+            logger.error(f"show-task on {gw['name']} failed: {e} | Body: {body}")
+            return None
+        except Exception as e:
+            logger.error(f"show-task on {gw['name']} failed: {e}")
+            return None
 
     # ---- Parsers matched to actual R82 output ----
 
