@@ -9,12 +9,14 @@ import time
 import logging
 import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, send_from_directory
 
 from collectors.mgmt_api import MgmtApiCollector
 from collectors.gaia_api import GaiaApiCollector
 from collectors.ssh_fallback import SshFallbackCollector
+from collectors import commands
 
 # ---- Logging ----
 logging.basicConfig(
@@ -27,7 +29,11 @@ logger = logging.getLogger("chkp-monitor")
 # ---- Load config ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-with open(os.path.join(BASE_DIR, "config.json")) as f:
+# CHKP_CONFIG picks another topology file, e.g. config.ccvs-r8220.json
+CONFIG_PATH = os.environ.get("CHKP_CONFIG") or os.path.join(BASE_DIR, "config.json")
+if not os.path.isabs(CONFIG_PATH):
+    CONFIG_PATH = os.path.join(BASE_DIR, CONFIG_PATH)
+with open(CONFIG_PATH) as f:
     CONFIG = json.load(f)
 
 creds_path = os.path.join(BASE_DIR, "credentials.json")
@@ -126,47 +132,58 @@ def mgmt_collector_loop():
         time.sleep(interval)
 
 
+def collect_one_gateway(gw_config: dict, gaia_collector, ssh_collector, previous: dict) -> dict:
+    """Gaia API first, SSH fallback second; adds interface rates from the previous poll."""
+    name = gw_config["name"]
+    data = gaia_collector.collect_gateway(gw_config)
+    if data.get("gaia_api_reachable"):
+        data["data_source"] = "gaia_api"
+    else:
+        logger.warning(f"Gaia API unreachable for {name}, trying SSH fallback")
+        data = ssh_collector.collect_gateway(gw_config)
+        data["data_source"] = "ssh_fallback" if data.get("ssh_reachable") else "failed"
+    data["collected_at"] = time.time()
+    prev = previous.get(name)
+    if prev:
+        commands.add_rates(data, prev, data["collected_at"] - prev.get("collected_at", 0))
+    return enrich_gateway_data(data)
+
+
 def gaia_collector_loop():
-    """Background thread: polls gateways via Gaia API, falls back to SSH."""
+    """Background thread: polls all gateways in parallel (one combined script each)."""
     gaia_collector = GaiaApiCollector(CONFIG, CREDENTIALS)
     ssh_collector = SshFallbackCollector(CONFIG, CREDENTIALS)
     interval = CONFIG["dashboard"]["poll_interval_seconds"]
+    gateways = CONFIG["gateways"]
+    pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(gateways))), thread_name_prefix="gw")
 
     while True:
+        started = time.time()
         try:
-            gaia_data = gaia_collector.collect()
+            with state_lock:
+                previous = dict(current_state["gateways"])
+            futures = {gw["name"]: pool.submit(collect_one_gateway, gw, gaia_collector, ssh_collector, previous)
+                       for gw in gateways}
             gw_results = {}
-            ssh_used = False
+            for name, fut in futures.items():
+                try:
+                    gw_results[name] = fut.result()
+                except Exception as e:
+                    logger.error(f"{name}: collection failed: {e}")
+                    gw_results[name] = enrich_gateway_data({"name": name, "data_source": "failed", "error": str(e)})
 
-            for gw_name, gw_data in gaia_data.get("gateways", {}).items():
-                if gw_data.get("gaia_api_reachable"):
-                    gw_data["data_source"] = "gaia_api"
-                    gw_results[gw_name] = enrich_gateway_data(gw_data)
-                else:
-                    # Fallback to SSH
-                    logger.warning(f"Gaia API unreachable for {gw_name}, trying SSH fallback")
-                    gw_config = next((g for g in CONFIG["gateways"] if g["name"] == gw_name), None)
-                    if gw_config:
-                        ssh_data = ssh_collector.collect_gateway(gw_config)
-                        ssh_data["data_source"] = "ssh_fallback"
-                        gw_results[gw_name] = enrich_gateway_data(ssh_data)
-                        ssh_used = True
-                    else:
-                        gw_data["data_source"] = "failed"
-                        gw_results[gw_name] = enrich_gateway_data(gw_data)
-
+            sources = {g.get("data_source") for g in gw_results.values()}
             with state_lock:
                 current_state["gateways"] = gw_results
-                current_state["collector_status"]["gaia_api"] = "ok"
-                current_state["collector_status"]["ssh_fallback"] = "active" if ssh_used else "idle"
+                current_state["collector_status"]["gaia_api"] = "ok" if "gaia_api" in sources or not gw_results else "error: no gateway reachable via Gaia API"
+                current_state["collector_status"]["ssh_fallback"] = "active" if "ssh_fallback" in sources else "idle"
                 current_state["last_update"] = datetime.now().isoformat()
-
-            logger.info("Gateway collection complete")
+            logger.info(f"Gateway collection complete in {time.time() - started:.1f}s")
         except Exception as e:
             logger.error(f"Gateway collector error: {e}")
             with state_lock:
                 current_state["collector_status"]["gaia_api"] = f"error: {e}"
-        time.sleep(interval)
+        time.sleep(max(1, interval - (time.time() - started)))
 
 
 # ---- Flask app ----
@@ -198,7 +215,8 @@ def main():
     logger.info(f"Management server: {CONFIG['management']['host']}")
     for gw in CONFIG["gateways"]:
         logger.info(f"Gateway: {gw['name']} ({gw['mgmt_ip']})")
-    logger.info(f"Dashboard: http://localhost:{CONFIG['dashboard']['port']}")
+    logger.info(f"Config: {CONFIG_PATH}")
+    logger.info(f"Dashboard: http://localhost:{CONFIG['dashboard']['port']}  (JSON for vmhost: /api/status)")
     logger.info("=" * 60)
 
     # Start collector threads

@@ -1,10 +1,16 @@
 """
-Tier 2 - SSH Fallback Collector
-Uses Paramiko to SSH to gateways when the Gaia API is unreachable.
-Runs the same commands and uses the same parsers as the Gaia API collector.
+SSH fallback collector (Paramiko), used when a gateway's Gaia API is unreachable.
+Runs the same combined script as the Gaia API collector, over ONE connection per poll.
+
+Works best when the monitoring user's shell is /bin/bash (then a plain exec is used).
+If the user lands in clish, it enters expert mode on an interactive shell and reads
+until the script's end marker instead of sleeping and hoping.
 """
 import time
+import shlex
 import logging
+
+from collectors import commands
 
 logger = logging.getLogger("chkp-monitor.ssh_fallback")
 
@@ -15,113 +21,84 @@ except ImportError:
     PARAMIKO_AVAILABLE = False
     logger.warning("Paramiko not installed - SSH fallback disabled")
 
+END = commands.MARK + "end"
+
 
 class SshFallbackCollector:
     def __init__(self, config: dict, credentials: dict):
-        self.gateways = config["gateways"]
         self.user = credentials["gaia"]["user"]
         self.password = credentials["gaia"]["password"]
-        # Borrow parsers from Gaia API collector
-        from collectors.gaia_api import GaiaApiCollector
-        self._parser = GaiaApiCollector(config, credentials)
+        self.expert_password = credentials["gaia"].get("expert_password", self.password)
+        self.script = commands.build_script()
+        self.timeout = config.get("ssh", {}).get("command_timeout_seconds", 60)
 
-    def _ssh_command(self, gw: dict, command: str) -> str | None:
-        """Execute a command via SSH and return the output."""
-        if not PARAMIKO_AVAILABLE:
-            return None
-
+    def _connect(self, gw: dict):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=gw["mgmt_ip"], port=gw.get("ssh_port", 22), username=self.user,
+                       password=self.password, timeout=15, look_for_keys=False, allow_agent=False)
+        return client
+
+    def _exec_bash(self, client) -> str | None:
+        """Plain exec; returns None if the login shell is clish rather than bash."""
         try:
-            client.connect(
-                hostname=gw["mgmt_ip"],
-                port=gw.get("ssh_port", 22),
-                username=self.user,
-                password=self.password,
-                timeout=15,
-                look_for_keys=False,
-                allow_agent=False,
-            )
-            # Use expert mode for Check Point commands
-            # Open a shell channel to handle the expert mode prompt
-            channel = client.invoke_shell()
-            time.sleep(1)
-
-            # Enter expert mode
-            channel.send("expert\n")
-            time.sleep(1)
-
-            # Send password for expert mode (same as login password on most lab setups)
-            channel.send(f"{self.password}\n")
-            time.sleep(1)
-
-            # Clear any buffer
-            if channel.recv_ready():
-                channel.recv(65535)
-
-            # Send the actual command
-            channel.send(f"{command}\n")
-            time.sleep(3)
-
-            # Collect output
-            output = ""
-            while channel.recv_ready():
-                output += channel.recv(65535).decode("utf-8", errors="replace")
-
-            channel.close()
-            return output
-
-        except Exception as e:
-            logger.error(f"SSH to {gw['name']} ({gw['mgmt_ip']}) failed: {e}")
+            # keep stdin referenced: paramiko sends EOF when the stdin file object is collected
+            stdin, stdout, _stderr = client.exec_command("bash -s", timeout=self.timeout)
+            stdin.write(self.script)
+            stdin.flush()
+            stdin.channel.shutdown_write()
+            out = stdout.read().decode("utf-8", errors="replace")
+        except Exception as e:  # clish may refuse or close the exec channel
+            logger.debug(f"bash exec not available: {e}")
             return None
-        finally:
-            client.close()
+        return out if END in out else None
+
+    def _exec_expert(self, client) -> str | None:
+        chan = client.invoke_shell(width=250, height=1000)
+        buf = ""
+
+        def read_until(token: str, seconds: float) -> bool:
+            nonlocal buf
+            deadline = time.time() + seconds
+            while time.time() < deadline:
+                if chan.recv_ready():
+                    buf += chan.recv(65535).decode("utf-8", errors="replace")
+                    if token in buf:
+                        return True
+                else:
+                    time.sleep(0.1)
+            return token in buf
+
+        read_until(">", 10)
+        chan.send("expert\n")
+        if read_until("assword", 5):
+            chan.send(self.expert_password + "\n")
+        read_until("#", 10)
+        buf = ""
+        # Send the script as one line so the shell does not echo marker lines back as input
+        chan.send("bash -c " + shlex.quote(self.script) + "\n")
+        ok = read_until("\n" + END, self.timeout)
+        chan.close()
+        return buf if ok else None
 
     def collect_gateway(self, gw: dict) -> dict:
-        """Collect all data from a single gateway via SSH."""
-        name = gw["name"]
-        result = {
-            "name": name,
-            "ip": gw["mgmt_ip"],
-            "ssh_reachable": False,
-            "os": {},
-            "firewall": {},
-            "cluster": {},
-            "kernel_memory": {},
-            "interfaces": [],
-        }
-
-        # cpstat os
-        os_output = self._ssh_command(gw, "cpstat os -f all")
-        if os_output is not None:
-            result["ssh_reachable"] = True
-            result["os"] = self._parser._parse_cpstat_os(os_output)
-
-        # cpstat fw
-        fw_output = self._ssh_command(gw, "cpstat fw -f all")
-        if fw_output is not None:
-            result["firewall"] = self._parser._parse_cpstat_fw(fw_output)
-
-        # cphaprob stat
-        ha_output = self._ssh_command(gw, "cphaprob stat")
-        if ha_output is not None:
-            result["cluster"] = self._parser._parse_cphaprob(ha_output)
-
-        # fw ctl pstat
-        pstat_output = self._ssh_command(gw, "fw ctl pstat")
-        if pstat_output is not None:
-            result["kernel_memory"] = self._parser._parse_fw_ctl_pstat(pstat_output)
-
-        # Interface stats
-        iface_output = self._ssh_command(gw, "cat /proc/net/dev")
-        if iface_output is not None:
-            result["interfaces"] = self._parser._parse_interfaces(iface_output)
-
-        return result
-
-    def collect(self) -> dict:
-        """Collect from all gateways via SSH."""
-        result = {"timestamp": time.time(), "gateways": {}}
-        for gw in self.gateways:
-            result["gateways"][gw["name"]] = self.collect_gateway(gw)
+        result = {"name": gw["name"], "ip": gw["mgmt_ip"], "ssh_reachable": False}
+        if not PARAMIKO_AVAILABLE:
+            result["error"] = "paramiko not installed"
+            return result
+        client = None
+        try:
+            client = self._connect(gw)
+            output = self._exec_bash(client) or self._exec_expert(client)
+            if output:
+                result["ssh_reachable"] = True
+                result.update(commands.parse_all(output))
+            else:
+                result["error"] = "no output (check the user's shell / expert password)"
+        except Exception as e:
+            logger.error(f"SSH to {gw['name']} ({gw['mgmt_ip']}) failed: {e}")
+            result["error"] = str(e)
+        finally:
+            if client:
+                client.close()
         return result

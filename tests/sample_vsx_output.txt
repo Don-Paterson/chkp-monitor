@@ -1,0 +1,100 @@
+@@@ os
+SVN Foundation Version String:  R82.20
+CPU Usage (%):  37
+CPU User Time (%):  20
+CPU System Time (%):  17
+CPU Idle Time (%):  63
+CPUs Number:  4
+Total Real Memory (Bytes):  8053116928
+Active Real Memory (Bytes):  5513761792
+Free Real Memory (Bytes):  2539355136
+Disk Free Space (%):  71
+Disk Total Space (Bytes):  107321753600
+Interface configuration table:
+---------------------------------------------------------------------
+|Name|Address    |Mask         |MTU |State|Mac Address      |
+---------------------------------------------------------------------
+|eth0|10.1.1.11  |255.255.255.0|1500|    1|00:0c:29:aa:bb:01|
+|eth1|0.0.0.0    |0.0.0.0      |1500|    1|00:0c:29:aa:bb:02|
+---------------------------------------------------------------------
+@@@ multi_cpu
+Processors load
+---------------------------------------------------------------------------------
+|CPU#|User Time(%)|System Time(%)|Idle Time(%)|Usage(%)|Run queue|Interrupts/sec|
+---------------------------------------------------------------------------------
+|   1|          60|            35|           5|      95|        ?|          1200|
+|   2|          10|             5|          85|      15|        ?|           300|
+|   3|           8|             4|          88|      12|        ?|           250|
+|   4|           2|             1|          97|       3|        ?|           100|
+---------------------------------------------------------------------------------
+@@@ fw
+Num. connections:  812
+Peak num. connections:  2310
+Connections capacity limit:  0
+Total accepted packets:  2435257
+|Name|Dir|Total |Accept|Deny|Log  |
+|eth0|in |  5000|  4900|  80|  100|
+|eth0|out|  4000|  3990|  10|    0|
+|    |   | 71127|15355|     0|19139|
+kmem - bytes used:  503247099
+kmem - bytes peak:  533816308
+@@@ ha
+HA module not started.
+@@@ pstat
+System Capacity Summary:
+  Physical memory used:  41% (3301 MB out of 7680 MB) - below watermark
+  Kernel   memory used:   9% (702 MB out of 7680 MB) - below watermark
+  Virtual  memory used:  30% (2305 MB out of 7680 MB) - below watermark
+Total memory  bytes  used: 503250451   peak: 533816308
+812 concurrent, 2310 peak concurrent
+@@@ multik
+ID | Active  | CPU    | Connections | Peak
+----------------------------------------------
+ 0 | Yes     | 3      |         310 |      900
+ 1 | Yes     | 2      |         502 |     1410
+@@@ netdev
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0
+  eth0: 98765432 120000 0 3 0 0 0 0 45678901 90000 0 0 0 0 0 0
+  eth1: 5555555 7000 1 0 0 0 0 0 4444444 6000 0 0 0 0 0 0
+wrp128: 1234 12 0 0 0 0 0 0 4321 21 0 0 0 0 0 0
+@@@ vsx
+VSID:            0
+VRID:            0
+Type:            VSX Gateway
+Name:            A-VSX-01
+Security Policy: VSX_Policy
+Installed at:    16Oct2026  9:31:02
+SIC Status:      Trust
+Connections number: 20
+Connections peak:   44
+Connections limit:  14900
+
+VSID:            1
+VRID:            1
+Type:            Virtual System
+Name:            VGW-Corp
+Security Policy: Corp_Policy
+Installed at:    16Oct2026  9:35:10
+SIC Status:      Trust
+Connections number: 610
+Connections peak:   1800
+Connections limit:  14900
+
+VSID:            2
+VRID:            2
+Type:            Virtual System
+Name:            VGW-DMZ
+Security Policy: DMZ_Policy
+Installed at:    16Oct2026  9:36:44
+SIC Status:      Trust
+Connections number: 182
+Connections peak:   466
+Connections limit:  14900
+@@@ fwk
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+  12001 admin     0 -20 2100000 400000  90000 S  88.0   5.0  10:01.22 fwk1_dev_0
+  12002 admin     0 -20 2100000 400000  90000 S   6.0   5.0   1:01.22 fwk1_1
+  12100 admin     0 -20 2100000 400000  90000 S   4.5   5.0   0:31.22 fwk2_dev_0
+@@@ end

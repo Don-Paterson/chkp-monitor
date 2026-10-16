@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VM Host Monitor</title>
+<style>
+:root {
+  --bg: #fcfcfb; --surface: #ffffff; --surface-2: #f3f3f1; --border: #e2e1dc;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #7d7c77;
+  --accent: #2a78d6; --accent-soft: rgba(42,120,214,.14);
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --grid: #ecebe7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #33332f;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #8f8e86;
+    --accent: #3987e5; --accent-soft: rgba(57,135,229,.18); --grid: #2a2a27;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #33332f;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #8f8e86;
+  --accent: #3987e5; --accent-soft: rgba(57,135,229,.18); --grid: #2a2a27;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 13px/1.45 "Segoe UI", system-ui, sans-serif; padding: 20px; }
+.num { font-family: "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+header { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: baseline; margin-bottom: 16px; }
+h1 { font-size: 18px; font-weight: 600; }
+h2 { font-size: 13px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .06em; margin: 22px 0 10px; }
+.kpi { color: var(--text-2); } .kpi b { color: var(--text); font-size: 16px; font-weight: 600; }
+.notes { width: 100%; color: var(--text-2); }
+.notes div::before { content: "ⓘ "; color: var(--accent); }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+.row { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; align-items: start; }
+/* per-logical-CPU strip */
+.cpus { display: flex; gap: 2px; height: 56px; align-items: flex-end; }
+.cpus .c { flex: 1; min-width: 4px; background: var(--surface-2); height: 100%; position: relative; border-radius: 2px; }
+.cpus .c i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--accent); border-radius: 2px 2px 0 0; }
+.cpus-legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--grid); }
+td.r, th.r { text-align: right; }
+tr.vmnet td:first-child { color: var(--accent); }
+/* VM cards */
+.vms { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.vm h3 { font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+.sub { color: var(--muted); font-size: 11px; margin: 2px 0 10px; word-break: break-word; }
+.badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+.badge.good::before { content: "● "; color: var(--good); }
+.badge.warning::before { content: "▲ "; color: var(--warning); }
+.badge.unknown::before { content: "? "; color: var(--muted); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+.stat .l { font-size: 11px; color: var(--muted); }
+.stat .v { font-size: 16px; font-weight: 600; }
+.stat .d { font-size: 11px; color: var(--text-2); }
+.bars { display: grid; grid-template-columns: 52px 1fr 44px; gap: 3px 8px; align-items: center; font-size: 11px; margin: 6px 0; }
+.bar { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 0 4px 4px 0; }
+.bar i.hot { background: var(--critical); }
+.mini { color: var(--text-2); font-size: 11px; }
+details { margin-top: 8px; font-size: 11px; color: var(--text-2); }
+details summary { cursor: pointer; color: var(--text-2); }
+details pre { white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow: auto; background: var(--surface-2); padding: 6px; border-radius: 4px; margin-top: 4px; }
+.lab { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 11px; color: var(--text-2); }
+.lab b { color: var(--text); }
+svg.spark { width: 100%; height: 36px; display: block; margin-top: 6px; }
+/* history chart */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+select, button { font: inherit; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+button.on { background: var(--accent-soft); border-color: var(--accent); }
+.chart { position: relative; }
+.chart svg { width: 100%; height: 220px; display: block; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 11px; display: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+.muted { color: var(--muted); }
+@media (max-width: 600px) { body { padding: 16px; } .stats { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>VM Host Monitor</h1>
+  <span class="kpi">CPU <b class="num" id="k-cpu">–</b></span>
+  <span class="kpi">RAM <b class="num" id="k-mem">–</b></span>
+  <span class="kpi">VMs <b class="num" id="k-vms">–</b></span>
+  <span class="kpi muted" id="k-ts"></span>
+  <div class="notes" id="notes"></div>
+</header>
+
+<div class="row">
+  <div class="panel">
+    <div class="mini" style="margin-bottom:6px">Logical processors (<span id="ncpu"></span>) · % busy each</div>
+    <div class="cpus" id="cpus"></div>
+    <div class="cpus-legend"><span>CPU 0</span><span>hover for value</span><span id="cpu-last"></span></div>
+  </div>
+  <div class="panel">
+    <div class="mini" style="margin-bottom:4px">Network adapters (VMnet = traffic between host and that virtual network)</div>
+    <table id="nets"></table>
+  </div>
+  <div class="panel">
+    <div class="mini" style="margin-bottom:4px">Physical disks</div>
+    <table id="disks"></table>
+  </div>
+</div>
+
+<h2>Virtual machines</h2>
+<div class="vms" id="vms"><div class="muted">Waiting for the second sample…</div></div>
+
+<h2>History</h2>
+<div class="panel">
+  <div class="controls">
+    <select id="h-series"></select>
+    <select id="h-metric">
+      <option value="cpu">CPU % of host</option>
+      <option value="mem">Memory (GB)</option>
+      <option value="io">Disk I/O (MB/s)</option>
+    </select>
+    <span id="h-ranges"></span>
+  </div>
+  <div class="chart"><svg id="h-svg" role="img" aria-label="History chart"></svg><div class="tip" id="h-tip"></div></div>
+</div>
+
+<h2>Other host processes (top by CPU)</h2>
+<div class="panel"><table id="others"></table></div>
+
+<h2 id="lab-h" style="display:none">Lab (from chkp-monitor)</h2>
+<div class="panel" id="lab" style="display:none"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = (v, d = 1) => v == null ? "–" : v.toFixed(d) + "%";
+const gb = b => b == null ? "–" : (b / 1073741824).toFixed(2) + " GB";
+function rate(b) {
+  if (b == null) return "–";
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB/s";
+  if (b >= 1024) return (b / 1024).toFixed(0) + " KB/s";
+  return b.toFixed(0) + " B/s";
+}
+const sparks = {};   // vm name -> [cpu values] for the last 10 minutes
+let lastState = null;
+
+function renderHost(s) {
+  const h = s.host;
+  $("k-cpu").textContent = pct(h.cpu_pct);
+  $("k-mem").textContent = `${gb(h.mem_used)} / ${gb(h.mem_total)} (${h.mem_pct.toFixed(0)}%)`;
+  $("k-vms").textContent = s.vms.length;
+  $("k-ts").textContent = "updated " + new Date(s.ts * 1000).toLocaleTimeString();
+  $("ncpu").textContent = h.ncpu;
+  $("cpu-last").textContent = "CPU " + (h.percpu.length - 1);
+  $("cpus").innerHTML = h.percpu.map((v, i) =>
+    `<div class="c" title="CPU ${i}: ${v.toFixed(0)}%"><i style="height:${Math.max(v, 1)}%"></i></div>`).join("");
+  $("notes").innerHTML = (s.notes || []).map(n => `<div>${esc(n)}</div>`).join("");
+  $("nets").innerHTML = `<tr><th>Adapter</th><th class="r">Rx</th><th class="r">Tx</th><th class="r">Err/Drop</th></tr>` +
+    h.nets.map(n => `<tr class="${n.vmnet ? "vmnet" : ""}"><td>${esc(n.vmnet || n.name)}</td>
+      <td class="r num">${rate(n.rx_bps)}</td><td class="r num">${rate(n.tx_bps)}</td>
+      <td class="r num">${n.errors + n.drops}</td></tr>`).join("");
+  $("disks").innerHTML = `<tr><th>Disk</th><th class="r">Read</th><th class="r">Write</th><th class="r">Busy</th></tr>` +
+    h.disks.map(d => `<tr><td>${esc(d.name)}</td><td class="r num">${rate(d.rd_bps)}</td>
+      <td class="r num">${rate(d.wr_bps)}</td><td class="r num">${d.busy_pct == null ? "–" : pct(d.busy_pct, 0)}</td></tr>`).join("");
+}
+
+function modeBadge(vm) {
+  if (vm.mode === "Native") return `<span class="badge good" title="Monitor Mode: ${esc(vm.monitor)}">Native</span>`;
+  if (vm.mode === "WHP/Hyper-V") return `<span class="badge warning" title="Monitor Mode: ULM - running on Hyper-V; slower, and host CPU figures under-report">WHP / Hyper-V</span>`;
+  return `<span class="badge unknown" title="No Monitor Mode line found in vmware.log">mode ?</span>`;
+}
+
+function sparkSvg(vals) {
+  if (!vals || vals.length < 2) return "";
+  const max = Math.max(5, ...vals), w = 300, h = 36;
+  const pts = vals.map((v, i) => `${(i / (vals.length - 1) * w).toFixed(1)},${(h - 2 - v / max * (h - 4)).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-label="CPU last 10 minutes, max ${max.toFixed(1)}%">
+    <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+
+function labFor(name, s) {
+  const gws = s.lab?.data?.gateways || {};
+  const key = Object.keys(gws).find(k => k.toLowerCase() === name.toLowerCase());
+  if (!key) return "";
+  const g = gws[key], os = g.os || {}, fw = g.firewall || {};
+  let html = `<div class="lab">Inside (Check Point): CPU <b>${pct(os.cpu_percent, 0)}</b> · mem <b>${pct(os.memory_percent, 0)}</b>
+    · conns <b>${fw.connections_current ?? "–"}</b>`;
+  const cores = g.cores || [];
+  if (cores.length) html += `<br>CoreXL: ` + cores.map(c => `fw_${c.id}@cpu${c.cpu}: ${c.connections}`).join(" · ");
+  const vs = g.vsx?.systems || [];
+  if (vs.length) html += `<br>Virtual systems: ` + vs.map(v =>
+    `<b>${esc(v.name)}</b> ${v.connections ?? "–"} conns${v.cpu_pct != null ? ", " + pct(v.cpu_pct, 0) + " CPU" : ""}`).join(" · ");
+  return html + "</div>";
+}
+
+function renderVms(s) {
+  if (!s.vms.length) { $("vms").innerHTML = `<div class="muted">No running vmware-vmx processes.</div>`; return; }
+  for (const vm of s.vms) {
+    (sparks[vm.name] ||= []).push(vm.cpu_pct);
+    const keep = Math.ceil(600 / (s.interval || 2));
+    if (sparks[vm.name].length > keep) sparks[vm.name].splice(0, sparks[vm.name].length - keep);
+  }
+  $("vms").innerHTML = s.vms.map(vm => {
+    const c = vm.config || {};
+    const nets = (c.nics || []).map(n => n.network + (n.connected ? "" : " (disconnected)")).join(", ");
+    const cfg = [c.vcpus && `${c.vcpus} vCPU`, c.memory_mb && `${(c.memory_mb / 1024).toFixed(1)} GB`,
+                 c.hw_version && `HW ${c.hw_version}`, c.guest_os, nets].filter(Boolean).join(" · ");
+    const vcpus = vm.vcpus_live.length
+      ? `<div class="bars">${vm.vcpus_live.map(v => `<span>vCPU ${v.index}</span>
+          <div class="bar"><i class="${v.pct >= 90 ? "hot" : ""}" style="width:${v.pct.toFixed(0)}%"></i></div>
+          <span class="num">${v.pct.toFixed(0)}%</span>`).join("")}</div>`
+      : `<div class="mini">Per-vCPU load: run elevated to see it.</div>`;
+    const busy = vm.busy_threads.length
+      ? `<div class="mini">Busy VMware threads: ${vm.busy_threads.map(t => `${esc(t.name)} ${t.pct.toFixed(0)}%`).join(" · ")}</div>` : "";
+    const probs = vm.problems.length
+      ? `<details><summary>${vm.problems.length} recent warnings/errors in vmware.log</summary><pre>${esc(vm.problems.join("\n"))}</pre></details>` : "";
+    return `<div class="panel vm">
+      <h3><span>${esc(vm.name)}</span>${modeBadge(vm)}</h3>
+      <div class="sub">PID ${vm.pid}${cfg ? " · " + esc(cfg) : ""}</div>
+      <div class="stats">
+        <div class="stat"><div class="l">CPU (host)</div><div class="v num">${pct(vm.cpu_pct)}</div><div class="d num">${vm.cores.toFixed(2)} cores</div><div class="d num">peak ${pct(vm.peak_pct)}</div></div>
+        <div class="stat"><div class="l">RAM in use</div><div class="v num">${gb(vm.rss)}</div><div class="d">${c.memory_mb ? "of " + (c.memory_mb / 1024).toFixed(1) + " GB" : ""}</div></div>
+        <div class="stat"><div class="l">Disk read</div><div class="v num">${rate(vm.rd_bps)}</div></div>
+        <div class="stat"><div class="l">Disk write</div><div class="v num">${rate(vm.wr_bps)}</div></div>
+      </div>
+      ${vcpus}${busy}
+      ${sparkSvg(sparks[vm.name])}
+      <div class="mini">CPU, last 10 min</div>
+      ${labFor(vm.name, s)}${probs}
+    </div>`;
+  }).join("");
+}
+
+function renderOthers(s) {
+  $("others").innerHTML = `<tr><th>Process</th><th class="r">PID</th><th class="r">CPU</th><th class="r">RAM</th></tr>` +
+    s.others.map(o => `<tr><td>${esc(o.name)}</td><td class="r num">${o.pid}</td><td class="r num">${pct(o.cpu_pct)}</td><td class="r num">${gb(o.rss)}</td></tr>`).join("");
+}
+
+function renderLab(s) {
+  if (!s.lab) return;
+  $("lab-h").style.display = ""; $("lab").style.display = "";
+  if (s.lab.error) { $("lab").innerHTML = `<span class="muted">Cannot reach ${esc(s.lab.url)}: ${esc(s.lab.error)}</span>`; return; }
+  const d = s.lab.data || {}, gws = d.gateways || {};
+  const rows = Object.entries(gws).map(([n, g]) => {
+    const os = g.os || {}, fw = g.firewall || {}, km = g.kernel_memory || {};
+    return `<tr><td>${esc(n)}</td><td>${esc(g.rag?.overall || "–")}</td><td class="r num">${pct(os.cpu_percent, 0)}</td>
+      <td class="r num">${pct(os.memory_percent, 0)}</td><td class="r num">${fw.connections_current ?? "–"}</td>
+      <td class="r num">${pct(km.kernel_memory_used_percent, 0)}</td><td>${esc(g.data_source || "")}</td></tr>`;
+  }).join("");
+  $("lab").innerHTML = `<table><tr><th>Gateway</th><th>Status</th><th class="r">CPU</th><th class="r">Mem</th>
+    <th class="r">Conns</th><th class="r">Kernel mem</th><th>Source</th></tr>${rows}</table>
+    <div class="mini" style="margin-top:6px">Last lab update ${d.last_update ? new Date(d.last_update).toLocaleTimeString() : "–"} · full view: ${esc(s.lab.url.replace(/\/api\/status$/, "/"))}</div>`;
+}
+
+// ---- History chart (single series: no legend; title = selector) ----
+const RANGES = [["10m", 10], ["1h", 60], ["6h", 360], ["24h", 1440], ["7d", 10080]];
+let hRange = 60;
+$("h-ranges").innerHTML = RANGES.map(([l, m]) => `<button data-m="${m}" class="${m === hRange ? "on" : ""}">${l}</button>`).join(" ");
+$("h-ranges").onclick = e => {
+  const m = +e.target.dataset.m; if (!m) return;
+  hRange = m;
+  for (const b of $("h-ranges").children) b.classList.toggle("on", +b.dataset.m === m);
+  drawHistory();
+};
+$("h-series").onchange = drawHistory; $("h-metric").onchange = drawHistory;
+
+async function loadSeries() {
+  const list = await (await fetch("/api/series")).json();
+  const cur = $("h-series").value || "host";
+  list.sort((a, b) => (a === "host" ? -1 : b === "host" ? 1 : a.localeCompare(b)));
+  $("h-series").innerHTML = list.map(n => `<option ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("");
+}
+
+async function drawHistory() {
+  const series = $("h-series").value || "host", metric = $("h-metric").value;
+  const r = await (await fetch(`/api/history?series=${encodeURIComponent(series)}&minutes=${hRange}&points=300`)).json();
+  const pts = r.rows.map(x => ({ t: x.t * 1000,
+    v: metric === "cpu" ? x.cpu : metric === "mem" ? (x.mem || 0) / 1073741824 : ((x.rd || 0) + (x.wr || 0)) / 1048576 }));
+  const svg = $("h-svg"), W = svg.clientWidth || 800, H = 220, L = 44, R = 10, T = 10, B = 24;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (pts.length < 2) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--muted)">Not enough data yet</text>`; return; }
+  const t0 = Date.now() - hRange * 60000, t1 = Date.now();
+  const vmax = Math.max(metric === "cpu" ? 5 : 0.1, ...pts.map(p => p.v)) * 1.1;
+  const x = t => L + (t - t0) / (t1 - t0) * (W - L - R), y = v => T + (1 - v / vmax) * (H - T - B);
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = vmax * i / 4, yy = y(v);
+    g += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="var(--grid)"/>
+          <text x="${L - 6}" y="${yy + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${v.toFixed(metric === "cpu" ? 0 : 1)}</text>`;
+  }
+  for (let i = 0; i <= 4; i++) {
+    const t = t0 + (t1 - t0) * i / 4;
+    const lbl = hRange > 1440 ? new Date(t).toLocaleDateString(undefined, { weekday: "short", hour: "2-digit" })
+                              : new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    g += `<text x="${x(t)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}" font-size="10" fill="var(--muted)">${lbl}</text>`;
+  }
+  // break the line where samples are missing (monitor was not running)
+  const gap = hRange * 60000 / 300 * 3;
+  let d = "";
+  pts.forEach((p, i) => { d += (i === 0 || p.t - pts[i - 1].t > gap ? "M" : "L") + x(p.t).toFixed(1) + "," + y(p.v).toFixed(1); });
+  g += `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+        <line id="h-cross" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-dasharray="3 3" visibility="hidden"/>
+        <circle id="h-dot" r="4" fill="var(--accent)" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>
+        <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" id="h-hit"/>`;
+  svg.innerHTML = g;
+  const unit = metric === "cpu" ? "%" : metric === "mem" ? " GB" : " MB/s";
+  $("h-hit").onmousemove = e => {
+    const rect = svg.getBoundingClientRect(), mx = (e.clientX - rect.left) * W / rect.width;
+    const tt = t0 + (mx - L) / (W - L - R) * (t1 - t0);
+    let best = pts[0]; for (const p of pts) if (Math.abs(p.t - tt) < Math.abs(best.t - tt)) best = p;
+    const px = x(best.t), py = y(best.v);
+    for (const id of ["h-cross", "h-dot"]) $(id).setAttribute("visibility", "visible");
+    $("h-cross").setAttribute("x1", px); $("h-cross").setAttribute("x2", px);
+    $("h-dot").setAttribute("cx", px); $("h-dot").setAttribute("cy", py);
+    const tip = $("h-tip");
+    tip.innerHTML = `${new Date(best.t).toLocaleString()}<br><b class="num">${best.v.toFixed(metric === "cpu" ? 1 : 2)}${unit}</b> · ${esc(series)}`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(px * rect.width / W + 12, rect.width - tip.offsetWidth - 4) + "px";
+    tip.style.top = "8px";
+  };
+  $("h-hit").onmouseleave = () => {
+    for (const id of ["h-cross", "h-dot"]) $(id).setAttribute("visibility", "hidden");
+    $("h-tip").style.display = "none";
+  };
+}
+
+async function tick() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    lastState = s;
+    if (s.host && s.host.percpu) renderHost(s);
+    if (s.vms) { renderVms(s); renderOthers(s); renderLab(s); }
+  } catch (e) { $("k-ts").textContent = "monitor not responding"; }
+}
+tick(); setInterval(tick, 2000);
+loadSeries().then(drawHistory); setInterval(() => loadSeries().then(drawHistory), 30000);
+</script>
+</body>
+</html>

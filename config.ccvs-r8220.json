@@ -1,0 +1,34 @@
+{
+    "_comment": "Topology for the CCVS-R8220 VSX lab. Replace the 192.0.2.x placeholders with each machine's management IP (the one you SSH to from A-GUI), then start with: $env:CHKP_CONFIG='config.ccvs-r8220.json'; python server.py",
+    "dashboard": {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "poll_interval_seconds": 30,
+        "refresh_interval_seconds": 15
+    },
+    "management": {
+        "host": "192.0.2.101",
+        "port": 443,
+        "name": "A-SMS"
+    },
+    "gateways": [
+        { "name": "A-VSX-01", "mgmt_ip": "192.0.2.11", "gaia_port": 443, "ssh_port": 22 },
+        { "name": "A-VSX-02", "mgmt_ip": "192.0.2.12", "gaia_port": 443, "ssh_port": 22 },
+        { "name": "A-VSX-03", "mgmt_ip": "192.0.2.13", "gaia_port": 443, "ssh_port": 22 }
+    ],
+    "ssh": {
+        "command_timeout_seconds": 60
+    },
+    "thresholds": {
+        "cpu_warn": 70,
+        "cpu_crit": 90,
+        "memory_warn": 75,
+        "memory_crit": 90,
+        "disk_warn": 80,
+        "disk_crit": 95,
+        "connections_warn": 20000,
+        "connections_crit": 40000,
+        "kernel_memory_warn": 75,
+        "kernel_memory_crit": 90
+    }
+}

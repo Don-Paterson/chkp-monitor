@@ -148,8 +148,10 @@ New-Item -ItemType Directory -Path "$INSTALL_DIR\static" -Force | Out-Null
 
 $files = @(
     "config.json",
+    "config.ccvs-r8220.json",
     "server.py",
     "collectors/__init__.py",
+    "collectors/commands.py",
     "collectors/mgmt_api.py",
     "collectors/gaia_api.py",
     "collectors/ssh_fallback.py",

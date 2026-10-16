@@ -18,6 +18,7 @@ class MgmtApiCollector:
         self.host = config["management"]["host"]
         self.port = config["management"]["port"]
         self.domain = config["management"].get("domain", "")
+        self.name = config["management"].get("name", "Management")
         self.user = credentials["management"]["user"]
         self.password = credentials["management"]["password"]
         self.base_url = f"https://{self.host}:{self.port}/web_api"
@@ -99,7 +100,7 @@ class MgmtApiCollector:
             "timestamp": time.time(),
             "management": {
                 "host": self.host,
-                "name": "A-SMS",
+                "name": self.name,
                 "reachable": False,
                 "status": "unknown",
             },
@@ -116,37 +117,36 @@ class MgmtApiCollector:
             for obj in gw_data.get("objects", []):
                 obj_type = obj.get("type", "")
                 name = obj.get("name", "unknown")
+                # Gateways, clusters, VSX gateways/clusters and their Virtual Systems.
+                # The management server itself is "checkpoint-host"; members are listed under clusters.
+                if obj_type in ("checkpoint-host", "cluster-member") or "Member" in obj_type:
+                    continue
 
-                if obj_type in ("simple-gateway", "simple-cluster", "CpmiGatewayCluster"):
-                    gw_info = {
-                        "name": name,
-                        "type": obj_type,
-                        "policy": {
-                            "name": obj.get("policy", {}).get("access-policy-name", "N/A")
-                            if isinstance(obj.get("policy"), dict)
-                            else "N/A",
-                            "installed": obj.get("policy", {}).get("access-policy-installed", False)
-                            if isinstance(obj.get("policy"), dict)
-                            else False,
-                            "install_time": obj.get("policy", {}).get("access-policy-install-time", {}).get("posix", 0)
-                            if isinstance(obj.get("policy"), dict)
-                            else 0,
-                        },
-                        "sic": {
-                            "status": "unknown",
-                        },
-                        "version": obj.get("version", "unknown"),
-                        "ipv4": obj.get("ipv4-address", ""),
-                    }
+                policy = obj.get("policy") if isinstance(obj.get("policy"), dict) else {}
+                install = policy.get("access-policy-installation-date") or policy.get("access-policy-install-time") or {}
+                gw_info = {
+                    "name": name,
+                    "type": obj_type,
+                    "is_vsx": "vsx" in obj_type.lower(),
+                    "is_vs": obj_type.lower().startswith(("cpmivs", "virtual-system")) and "vsx" not in obj_type.lower(),
+                    "policy": {
+                        "name": policy.get("access-policy-name", "N/A"),
+                        "installed": policy.get("access-policy-installed", False),
+                        "install_time": (install.get("posix", 0) / 1000 if install.get("posix", 0) > 1e11
+                                         else install.get("posix", 0)) if isinstance(install, dict) else 0,
+                        "threat_policy": policy.get("threat-policy-name", ""),
+                    },
+                    "sic": {"status": "unknown"},
+                    "version": obj.get("version", "unknown"),
+                    "ipv4": obj.get("ipv4-address", ""),
+                }
 
-                    # Extract SIC status from the object
-                    sic_state = obj.get("sic-state", "")
-                    if not sic_state:
-                        # Try nested under connection
-                        sic_state = obj.get("connection", {}).get("sic-state", "") if isinstance(obj.get("connection"), dict) else ""
-                    gw_info["sic"]["status"] = sic_state if sic_state else "unknown"
+                sic_state = obj.get("sic-state", "")
+                if not sic_state and isinstance(obj.get("connection"), dict):
+                    sic_state = obj["connection"].get("sic-state", "")
+                gw_info["sic"]["status"] = sic_state or obj.get("sic-status", "") or "unknown"
 
-                    result["gateways"][name] = gw_info
+                result["gateways"][name] = gw_info
 
         # -- Cluster-specific info --
         # Try to get cluster members via show-simple-cluster for each cluster object

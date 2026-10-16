@@ -307,6 +307,12 @@
             margin-bottom: 12px;
         }
 
+        .cpu-bars { display: flex; gap: 3px; align-items: flex-end; height: 40px; margin-top: 6px; }
+        .cpu-bars .c { flex: 1; background: var(--bg); height: 100%; position: relative; border-radius: 2px; }
+        .cpu-bars .c i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--accent); border-radius: 2px 2px 0 0; }
+        .cpu-bars .c i.hot { background: var(--red); }
+        .vs-name { color: var(--text); }
+
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
@@ -332,7 +338,7 @@
 </div>
 
 <script>
-const REFRESH_MS = 30000;
+const REFRESH_MS = 15000;
 
 function ragLabel(rag) {
     const labels = { green: 'Healthy', amber: 'Warning', red: 'Critical', unknown: 'No Data' };
@@ -390,7 +396,7 @@ function renderMgmtCard(mgmt, gwData) {
 
         policyHtml += `
             <div class="mgmt-item">
-                <div class="label">${name} Policy</div>
+                <div class="label">${name} Policy${gw.is_vsx ? ' (VSX)' : gw.is_vs ? ' (VS)' : ''}</div>
                 <div class="value">${policy.name || '—'}</div>
                 <div class="value" style="font-size:10px; color: var(--${policyInstalled})">${policy.installed ? 'Installed' : 'Not Installed'}</div>
                 <div class="value" style="font-size:10px">${installTime}</div>
@@ -435,7 +441,7 @@ function renderMgmtCard(mgmt, gwData) {
             <div class="card-header">
                 <div>
                     <div class="card-title">${m.name || 'A-SMS'}</div>
-                    <div class="card-subtitle">${m.host || '10.1.1.101'} · Management Server</div>
+                    <div class="card-subtitle">${m.host || '—'} · Management Server</div>
                 </div>
                 <div class="rag-badge ${overallRag}">
                     <div class="rag-dot ${overallRag}"></div>
@@ -469,18 +475,23 @@ function renderGwCard(name, gw) {
     const source = gw.data_source || 'unknown';
     const sourceLabel = source === 'gaia_api' ? 'Gaia API' : source === 'ssh_fallback' ? 'SSH Fallback' : source;
 
-    // Top 4 interfaces by traffic
+    // Busiest interfaces right now (rates need two polls; until then, by total bytes)
+    const ifRate = i => (i.rx_bps ?? 0) + (i.tx_bps ?? 0);
     const topIfaces = ifaces
-        .filter(i => i.name && i.name.match(/^(eth|bond|vlan)/i) && i.name !== 'lo')
-        .sort((a, b) => ((b.rx_bytes||0) + (b.tx_bytes||0)) - ((a.rx_bytes||0) + (a.tx_bytes||0)))
-        .slice(0, 6);
+        .filter(i => i.name && i.name !== 'lo' && i.rx_bytes !== undefined)
+        .sort((a, b) => (ifRate(b) - ifRate(a)) || (((b.rx_bytes||0) + (b.tx_bytes||0)) - ((a.rx_bytes||0) + (a.tx_bytes||0))))
+        .slice(0, 8);
+    const cpus = gw.cpus || [];
+    const cores = gw.cores || [];
+    const vsx = gw.vsx || {};
+    const systems = (vsx.systems || []).filter(v => v.id !== 0 || v.connections !== null);
 
     return `
         <div class="card">
             <div class="card-header">
                 <div>
                     <div class="card-title">${name}</div>
-                    <div class="card-subtitle">${gw.ip || '—'} · ${clusterState}</div>
+                    <div class="card-subtitle">${gw.ip || '—'} · ${(cluster.members || []).length ? 'Cluster: ' + clusterState : (vsx.is_vsx ? 'VSX gateway' : 'Gateway')}${os.version ? ' · ' + os.version : ''}</div>
                 </div>
                 <div class="rag-badge ${overallRag}">
                     <div class="rag-dot ${overallRag}"></div>
@@ -533,27 +544,60 @@ function renderGwCard(name, gw) {
                 </div>
             ` : ''}
 
+            ${cpus.length > 0 ? `
+                <div class="section-label">CPU per core (inside the gateway)</div>
+                <div class="cpu-bars">
+                    ${cpus.map(c => `<div class="c" title="CPU ${c.cpu}: ${c.usage}% (user ${c.user}%, sys ${c.system}%)"><i class="${c.usage >= 90 ? 'hot' : ''}" style="height:${Math.max(c.usage, 2)}%"></i></div>`).join('')}
+                </div>
+                <div class="metric-detail">${cpus.map(c => c.cpu + ':' + c.usage + '%').join(' · ')}</div>
+            ` : ''}
+
+            ${cores.length > 0 ? `
+                <div class="section-label">CoreXL firewall instances</div>
+                <table class="iface-table">
+                    <tr><th>Instance</th><th>CPU</th><th>Conns</th><th>Peak</th></tr>
+                    ${cores.map(c => `<tr><td>fw_${c.id}${c.active ? '' : ' (inactive)'}</td><td>${c.cpu}</td><td>${fmtNum(c.connections)}</td><td>${fmtNum(c.peak)}</td></tr>`).join('')}
+                </table>
+            ` : ''}
+
+            ${systems.length > 0 ? `
+                <div class="section-label">Virtual systems (VSX)</div>
+                <table class="iface-table">
+                    <tr><th>VS</th><th>CPU</th><th>Conns</th><th>Peak</th><th>Policy</th></tr>
+                    ${systems.map(v => `<tr title="${v.type || ''} · limit ${fmtNum(v.limit)} · SIC ${v.sic || '—'} · installed ${v.installed_at || '—'}">
+                        <td style="white-space:nowrap"><span class="vs-name">${v.id} ${v.name || '—'}</span></td>
+                        <td>${v.cpu_pct == null ? '—' : v.cpu_pct + '%'}</td>
+                        <td>${fmtNum(v.connections)}</td>
+                        <td>${fmtNum(v.peak)}</td>
+                        <td>${v.policy || '—'}${v.sic && !/trust/i.test(v.sic) ? ' · SIC ' + v.sic : ''}</td>
+                    </tr>`).join('')}
+                </table>
+                <div class="metric-detail">VS CPU = that VS's fwk processes over 1 s (100% = one core). Hover a row for type, limit, SIC and install time.</div>
+            ` : ''}
+
             ${topIfaces.length > 0 ? `
                 <div class="section-label">Interfaces</div>
                 <table class="iface-table">
                     <tr>
                         <th>Name</th>
-                        <th>RX</th>
-                        <th>TX</th>
-                        <th>Err</th>
+                        <th>RX/s</th>
+                        <th>TX/s</th>
+                        <th>Total RX / TX</th>
+                        <th>Err/Drop</th>
                     </tr>
                     ${topIfaces.map(i => `
                         <tr>
                             <td>${i.name}</td>
-                            <td>${fmtBytes(i.rx_bytes)}</td>
-                            <td>${fmtBytes(i.tx_bytes)}</td>
-                            <td>${(i.rx_errors || 0) + (i.tx_errors || 0)}</td>
+                            <td>${i.rx_bps == null ? '—' : fmtBytes(Math.round(i.rx_bps))}</td>
+                            <td>${i.tx_bps == null ? '—' : fmtBytes(Math.round(i.tx_bps))}</td>
+                            <td>${fmtBytes(i.rx_bytes)} / ${fmtBytes(i.tx_bytes)}</td>
+                            <td>${(i.rx_errors || 0) + (i.tx_errors || 0) + (i.rx_drops || 0) + (i.tx_drops || 0)}</td>
                         </tr>
                     `).join('')}
                 </table>
             ` : ''}
 
-            <div class="data-source">Source: ${sourceLabel}</div>
+            <div class="data-source">Source: ${sourceLabel}${gw.error ? ' · ' + gw.error : ''}</div>
         </div>
     `;
 }

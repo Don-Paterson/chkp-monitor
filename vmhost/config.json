@@ -1,0 +1,13 @@
+{
+    "listen": "127.0.0.1",
+    "port": 8090,
+    "sample_seconds": 2,
+    "vm_roots": ["E:\\VirtualMachines"],
+    "vmrun_path": null,
+    "process_names": ["vmware-vmx.exe"],
+    "history_db": "history.sqlite",
+    "history_days": 7,
+    "top_other": 8,
+    "lab_status_url": null,
+    "lab_poll_seconds": 30
+}
