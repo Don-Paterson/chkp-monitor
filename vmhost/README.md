@@ -10,7 +10,7 @@ Runs on the **Windows host** (not inside the lab) and shows, per running VM:
 
 and for the host: per-logical-CPU load, memory, physical disks, every network adapter
 (VMware's `VMnetX` adapters included) and the busiest non-VM processes. Every sample
-is stored in `history.sqlite` (7 days by default) and drawn as a history chart.
+is stored in `history.sqlite` (3 days by default, roughly 3 MB per VM per day) and drawn as a history chart.
 
 If chkp-monitor is running inside the lab, vmhost also pulls its `/api/status` and shows
 the Check Point view (CPU per core, CoreXL instances, connections per virtual system)
@@ -25,7 +25,8 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1     # from an elevated PowerS
 ```
 
 `run.ps1` creates a `.venv`, installs `psutil`, opens http://127.0.0.1:8090 and starts the
-monitor. Python 3.10+ is required (`winget install Python.Python.3.12`).
+monitor. Python 3.10+ is required (`winget install --id Python.Python.3.12 --scope user`).
+Everything stays in this folder: delete it to remove the monitor.
 
 **Run it elevated.** Without elevation Windows hides the vmware-vmx threads, so per-vCPU
 load is missing. VM names still resolve (from `vmrun list` + `vmware.log`), just a
