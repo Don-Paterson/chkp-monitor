@@ -48,7 +48,19 @@ td.r, th.r { text-align: right; }
 tr.vmnet td:first-child { color: var(--accent); }
 /* VM cards */
 .vms { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
-.vm h3 { font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+.vm h3 { font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: grab; }
+.vm h3 .right { display: flex; align-items: center; gap: 6px; }
+.pin { background: none; border: 1px solid transparent; border-radius: 6px; padding: 0 4px; font-size: 14px; line-height: 20px; cursor: pointer; filter: grayscale(1); opacity: .45; }
+.pin:hover { opacity: .9; border-color: var(--border); }
+.pin[aria-pressed="true"] { filter: none; opacity: 1; }
+.vm.pinned { border-top: 2px solid var(--accent); }
+.vm.off { opacity: .55; align-self: start; }
+.vm.dragging { opacity: .35; }
+.vm.drop-before { box-shadow: -4px 0 0 var(--accent); }
+.vm.drop-after { box-shadow: 4px 0 0 var(--accent); }
+.vm-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin: 22px 0 10px; }
+.vm-head h2 { margin: 0; }
+.vm-head label { color: var(--text-2); font-size: 12px; }
 .sub { color: var(--muted); font-size: 11px; margin: 2px 0 10px; word-break: break-word; }
 .badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
 .badge.good::before { content: "● "; color: var(--good); }
@@ -106,7 +118,17 @@ button.on { background: var(--accent-soft); border-color: var(--accent); }
   </div>
 </div>
 
-<h2>Virtual machines</h2>
+<div class="vm-head">
+  <h2>Virtual machines</h2>
+  <label>Order of unpinned VMs
+    <select id="vm-sort">
+      <option value="cpu">Busiest first</option>
+      <option value="name">Name</option>
+      <option value="custom">My order</option>
+    </select>
+  </label>
+  <span class="mini">📌 pins a VM to the top · drag a card by its title to move it</span>
+</div>
 <div class="vms" id="vms"><div class="muted">Waiting for the second sample…</div></div>
 
 <h2>History</h2>
@@ -192,43 +214,134 @@ function labFor(name, s) {
   return html + "</div>";
 }
 
+// ---- Card layout: pinned VMs first (in the order you set), then the rest by the chosen sort.
+// Saved by the monitor in layout.json, so it survives restarts and works in any browser.
+let layout = { pinned: [], order: [], sort: "cpu" };
+let dragName = null;
+
+async function loadLayout() {
+  try { layout = Object.assign(layout, await (await fetch("/api/layout")).json()); } catch (e) {}
+  $("vm-sort").value = layout.sort;
+}
+function saveLayout() {
+  fetch("/api/layout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(layout) });
+  if (lastState) renderVms(lastState);
+}
+$("vm-sort").onchange = e => { layout.sort = e.target.value; saveLayout(); };
+
+function orderedCards(s) {
+  const running = new Map(s.vms.map(vm => [vm.name, vm]));
+  const pinned = layout.pinned.map(n => ({ name: n, vm: running.get(n) || null, pinned: true }));
+  const rest = s.vms.filter(vm => !layout.pinned.includes(vm.name)).map(vm => ({ name: vm.name, vm, pinned: false }));
+  if (layout.sort === "name") rest.sort((a, b) => a.name.localeCompare(b.name));
+  else if (layout.sort === "custom") {
+    const pos = n => { const i = layout.order.indexOf(n); return i < 0 ? 1e9 : i; };
+    rest.sort((a, b) => (pos(a.name) - pos(b.name)) || a.name.localeCompare(b.name));
+  } else rest.sort((a, b) => b.vm.cpu_pct - a.vm.cpu_pct);
+  return [...pinned, ...rest];
+}
+
+function pinButton(name, pinned) {
+  return `<button class="pin" data-pin="${esc(name)}" aria-pressed="${pinned}" title="${pinned ? "Unpin" : "Pin to the top"}">📌</button>`;
+}
+
+function vmCard(vm, s, pinned) {
+  const c = vm.config || {};
+  const nets = (c.nics || []).map(n => n.network + (n.connected ? "" : " (disconnected)")).join(", ");
+  const cfg = [c.vcpus && `${c.vcpus} vCPU`, c.memory_mb && `${(c.memory_mb / 1024).toFixed(1)} GB`,
+               c.hw_version && `HW ${c.hw_version}`, c.guest_os, nets].filter(Boolean).join(" · ");
+  const vcpus = vm.vcpus_live.length
+    ? `<div class="bars">${vm.vcpus_live.map(v => `<span>vCPU ${v.index}</span>
+        <div class="bar"><i class="${v.pct >= 90 ? "hot" : ""}" style="width:${v.pct.toFixed(0)}%"></i></div>
+        <span class="num">${v.pct.toFixed(0)}%</span>`).join("")}</div>`
+    : `<div class="mini">Per-vCPU load: run elevated to see it.</div>`;
+  const busy = vm.busy_threads.length
+    ? `<div class="mini">Busy VMware threads: ${vm.busy_threads.map(t => `${esc(t.name)} ${t.pct.toFixed(0)}%`).join(" · ")}</div>` : "";
+  const probs = vm.problems.length
+    ? `<details><summary>${vm.problems.length} recent warnings/errors in vmware.log</summary><pre>${esc(vm.problems.join("\n"))}</pre></details>` : "";
+  return `<div class="panel vm${pinned ? " pinned" : ""}" data-name="${esc(vm.name)}" draggable="true">
+    <h3><span>${esc(vm.name)}</span><span class="right">${modeBadge(vm)}${pinButton(vm.name, pinned)}</span></h3>
+    <div class="sub">PID ${vm.pid}${cfg ? " · " + esc(cfg) : ""}</div>
+    <div class="stats">
+      <div class="stat"><div class="l">CPU (host)</div><div class="v num">${pct(vm.cpu_pct)}</div><div class="d num">${vm.cores.toFixed(2)} cores</div><div class="d num">peak ${pct(vm.peak_pct)}</div></div>
+      <div class="stat"><div class="l">RAM in use</div><div class="v num">${gb(vm.rss)}</div><div class="d">${c.memory_mb ? "of " + (c.memory_mb / 1024).toFixed(1) + " GB" : ""}</div></div>
+      <div class="stat"><div class="l">Disk read</div><div class="v num">${rate(vm.rd_bps)}</div></div>
+      <div class="stat"><div class="l">Disk write</div><div class="v num">${rate(vm.wr_bps)}</div></div>
+    </div>
+    ${vcpus}${busy}
+    ${sparkSvg(sparks[vm.name])}
+    <div class="mini">CPU, last 10 min</div>
+    ${labFor(vm.name, s)}${probs}
+  </div>`;
+}
+
+function offCard(name) {
+  return `<div class="panel vm pinned off" data-name="${esc(name)}" draggable="true">
+    <h3><span>${esc(name)}</span><span class="right">${pinButton(name, true)}</span></h3>
+    <div class="sub">Not running</div></div>`;
+}
+
 function renderVms(s) {
-  if (!s.vms.length) { $("vms").innerHTML = `<div class="muted">No running vmware-vmx processes.</div>`; return; }
+  if (dragName) return;   // don't rebuild the cards in the middle of a drag
   for (const vm of s.vms) {
     (sparks[vm.name] ||= []).push(vm.cpu_pct);
     const keep = Math.ceil(600 / (s.interval || 2));
     if (sparks[vm.name].length > keep) sparks[vm.name].splice(0, sparks[vm.name].length - keep);
   }
-  $("vms").innerHTML = s.vms.map(vm => {
-    const c = vm.config || {};
-    const nets = (c.nics || []).map(n => n.network + (n.connected ? "" : " (disconnected)")).join(", ");
-    const cfg = [c.vcpus && `${c.vcpus} vCPU`, c.memory_mb && `${(c.memory_mb / 1024).toFixed(1)} GB`,
-                 c.hw_version && `HW ${c.hw_version}`, c.guest_os, nets].filter(Boolean).join(" · ");
-    const vcpus = vm.vcpus_live.length
-      ? `<div class="bars">${vm.vcpus_live.map(v => `<span>vCPU ${v.index}</span>
-          <div class="bar"><i class="${v.pct >= 90 ? "hot" : ""}" style="width:${v.pct.toFixed(0)}%"></i></div>
-          <span class="num">${v.pct.toFixed(0)}%</span>`).join("")}</div>`
-      : `<div class="mini">Per-vCPU load: run elevated to see it.</div>`;
-    const busy = vm.busy_threads.length
-      ? `<div class="mini">Busy VMware threads: ${vm.busy_threads.map(t => `${esc(t.name)} ${t.pct.toFixed(0)}%`).join(" · ")}</div>` : "";
-    const probs = vm.problems.length
-      ? `<details><summary>${vm.problems.length} recent warnings/errors in vmware.log</summary><pre>${esc(vm.problems.join("\n"))}</pre></details>` : "";
-    return `<div class="panel vm">
-      <h3><span>${esc(vm.name)}</span>${modeBadge(vm)}</h3>
-      <div class="sub">PID ${vm.pid}${cfg ? " · " + esc(cfg) : ""}</div>
-      <div class="stats">
-        <div class="stat"><div class="l">CPU (host)</div><div class="v num">${pct(vm.cpu_pct)}</div><div class="d num">${vm.cores.toFixed(2)} cores</div><div class="d num">peak ${pct(vm.peak_pct)}</div></div>
-        <div class="stat"><div class="l">RAM in use</div><div class="v num">${gb(vm.rss)}</div><div class="d">${c.memory_mb ? "of " + (c.memory_mb / 1024).toFixed(1) + " GB" : ""}</div></div>
-        <div class="stat"><div class="l">Disk read</div><div class="v num">${rate(vm.rd_bps)}</div></div>
-        <div class="stat"><div class="l">Disk write</div><div class="v num">${rate(vm.wr_bps)}</div></div>
-      </div>
-      ${vcpus}${busy}
-      ${sparkSvg(sparks[vm.name])}
-      <div class="mini">CPU, last 10 min</div>
-      ${labFor(vm.name, s)}${probs}
-    </div>`;
-  }).join("");
+  const cards = orderedCards(s);
+  if (!cards.length) { $("vms").innerHTML = `<div class="muted">No running vmware-vmx processes.</div>`; return; }
+  // keep expanded "recent warnings" lists open across refreshes
+  const open = new Set([...$("vms").querySelectorAll(".vm details[open]")].map(d => d.closest(".vm").dataset.name));
+  $("vms").innerHTML = cards.map(c => c.vm ? vmCard(c.vm, s, c.pinned) : offCard(c.name)).join("");
+  for (const card of $("vms").querySelectorAll(".vm")) {
+    if (open.has(card.dataset.name)) card.querySelector("details")?.setAttribute("open", "");
+  }
 }
+
+// Pin / unpin
+$("vms").addEventListener("click", e => {
+  const b = e.target.closest(".pin"); if (!b) return;
+  const n = b.dataset.pin;
+  layout.pinned = layout.pinned.includes(n) ? layout.pinned.filter(x => x !== n) : [...layout.pinned, n];
+  saveLayout();
+});
+
+// Drag to reorder. Dropping among pinned cards pins; dropping among the others unpins
+// and switches the others to "My order".
+function clearDrop() { for (const el of $("vms").querySelectorAll(".drop-before, .drop-after")) el.classList.remove("drop-before", "drop-after"); }
+function dropSide(card, e) { const r = card.getBoundingClientRect(); return e.clientX < r.left + r.width / 2 ? "before" : "after"; }
+$("vms").addEventListener("dragstart", e => {
+  const card = e.target.closest(".vm"); if (!card) return;
+  dragName = card.dataset.name;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", dragName);
+  card.classList.add("dragging");
+});
+$("vms").addEventListener("dragover", e => {
+  const card = e.target.closest(".vm"); if (!card || !dragName || card.dataset.name === dragName) return;
+  e.preventDefault();
+  clearDrop(); card.classList.add("drop-" + dropSide(card, e));
+});
+$("vms").addEventListener("drop", e => {
+  const card = e.target.closest(".vm"); if (!card || !dragName) return;
+  e.preventDefault();
+  const target = card.dataset.name, side = dropSide(card, e), moving = dragName;
+  if (target === moving) return;
+  const shown = [...$("vms").querySelectorAll(".vm")].map(el => ({ name: el.dataset.name, pinned: el.classList.contains("pinned") }));
+  let pinned = shown.filter(c => c.pinned).map(c => c.name).filter(n => n !== moving);
+  let others = shown.filter(c => !c.pinned).map(c => c.name).filter(n => n !== moving);
+  const into = shown.find(c => c.name === target).pinned ? pinned : others;
+  into.splice(into.indexOf(target) + (side === "after" ? 1 : 0), 0, moving);
+  layout.pinned = pinned;
+  if (into === others) { layout.order = others; layout.sort = "custom"; $("vm-sort").value = "custom"; }
+  dragName = null;
+  saveLayout();
+});
+$("vms").addEventListener("dragend", () => {
+  clearDrop(); dragName = null;
+  for (const el of $("vms").querySelectorAll(".dragging")) el.classList.remove("dragging");
+  if (lastState) renderVms(lastState);
+});
 
 function renderOthers(s) {
   $("others").innerHTML = `<tr><th>Process</th><th class="r">PID</th><th class="r">CPU</th><th class="r">RAM</th></tr>` +
@@ -331,7 +444,7 @@ async function tick() {
     if (s.vms) { renderVms(s); renderOthers(s); renderLab(s); }
   } catch (e) { $("k-ts").textContent = "monitor not responding"; }
 }
-tick(); setInterval(tick, 2000);
+loadLayout().then(tick); setInterval(tick, 2000);
 loadSeries().then(drawHistory); setInterval(() => loadSeries().then(drawHistory), 30000);
 </script>
 </body>

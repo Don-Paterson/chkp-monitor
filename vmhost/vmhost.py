@@ -369,6 +369,36 @@ def lab_poller(cfg: dict, collector: Collector):
 
 # ---- HTTP ------------------------------------------------------------------
 
+LAYOUT_PATH = os.path.join(BASE_DIR, "layout.json")
+SORT_MODES = ("cpu", "name", "custom")
+
+
+def load_layout() -> dict:
+    """Card layout chosen in the dashboard: pinned VMs (in order), custom order, sort mode."""
+    layout = {"pinned": [], "order": [], "sort": "cpu"}
+    try:
+        with open(LAYOUT_PATH, encoding="utf-8") as f:
+            layout.update(clean_layout(json.load(f)))
+    except (OSError, ValueError):
+        pass
+    return layout
+
+
+def clean_layout(data) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("layout must be an object")
+
+    def names(key):
+        v = data.get(key, [])
+        if not isinstance(v, list):
+            raise ValueError(f"{key} must be a list")
+        return [str(n)[:200] for n in v if isinstance(n, str)][:500]
+
+    sort = data.get("sort", "cpu")
+    return {"pinned": names("pinned"), "order": names("order"),
+            "sort": sort if sort in SORT_MODES else "cpu"}
+
+
 def make_handler(collector: Collector, history: History):
     static_dir = os.path.join(BASE_DIR, "static")
 
@@ -405,8 +435,27 @@ def make_handler(collector: Collector, history: History):
                 self._json({"series": series, "minutes": minutes, "rows": history.query(series, minutes, points)})
             elif u.path == "/api/series":
                 self._json(history.series())
+            elif u.path == "/api/layout":
+                self._json(load_layout())
             else:
                 self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            if urlparse(self.path).path != "/api/layout":
+                self._send(404, b"not found", "text/plain")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 65536:
+                    raise ValueError("too large")
+                layout = clean_layout(json.loads(self.rfile.read(length) or b"{}"))
+                tmp = LAYOUT_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(layout, f, indent=2)
+                os.replace(tmp, LAYOUT_PATH)
+                self._json(layout)
+            except (ValueError, OSError) as e:
+                self._send(400, str(e).encode(), "text/plain")
 
     return Handler
 

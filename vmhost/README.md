@@ -149,7 +149,20 @@ Then open http://127.0.0.1:8090 in any browser.
 - **Physical disks** — read/write per disk. Sustained reads on the system disk while RAM is
   over 90% usually means paging.
 
-### VM cards (busiest first)
+### VM cards
+
+**Order and pinning**
+
+- Click **📌** on a card to pin it. Pinned VMs stay at the top in your order, even when they
+  are switched off (then they show as a dimmed **Not running** card). Click 📌 again to unpin.
+- **Drag a card by its title** to move it. Drop it among the pinned cards to pin it there;
+  drop it among the others to place it, which switches them to *My order*.
+- **Order of unpinned VMs** (next to the heading): *Busiest first* (by CPU), *Name*, or *My order*.
+- The layout is saved by the monitor in `vmhost\layout.json`, so it survives restarts and
+  works in any browser. Delete that file to reset it. VMs are matched by display name.
+
+**What each card shows**
+
 
 | Item | Meaning |
 |---|---|
@@ -207,9 +220,9 @@ Restart the monitor after editing.
 ## 7. Updating to a newer version
 
 1. Stop the monitor.
-2. Copy `C:\Tools\chkp-monitor\vmhost\config.json` somewhere safe (and `history.sqlite` if you want to keep history).
+2. Copy `C:\Tools\chkp-monitor\vmhost\config.json` and `layout.json` somewhere safe (and `history.sqlite` if you want to keep history).
 3. Delete `C:\Tools\chkp-monitor` and repeat **Step 2** of the install.
-4. Put your `config.json` back and start as usual (the first start rebuilds `.venv`).
+4. Put `config.json` and `layout.json` back and start as usual (the first start rebuilds `.venv`).
 
 With Git: `cd C:\Tools\chkp-monitor; git pull` — your `config.json` changes are kept unless the file changed upstream.
 

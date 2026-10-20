@@ -7,3 +7,4 @@ logs/
 .venv/
 vmhost/history.sqlite*
 vmhost/vmhost.log
+vmhost/layout.json
