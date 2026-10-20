@@ -13,6 +13,7 @@ shows the Check Point view of each gateway next to its VM.
 
 Run:  python vmhost.py            (elevated PowerShell gives per-vCPU names + VM names faster)
 """
+import argparse
 import json
 import os
 import re
@@ -392,6 +393,9 @@ def make_handler(collector: Collector, history: History):
             if u.path in ("/", "/index.html"):
                 with open(os.path.join(static_dir, "index.html"), "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
+            elif u.path == "/favicon.ico":
+                with open(os.path.join(static_dir, "vmhost.ico"), "rb") as f:
+                    self._send(200, f.read(), "image/x-icon")
             elif u.path == "/api/state":
                 self._json(collector.snapshot())
             elif u.path == "/api/history":
@@ -407,7 +411,29 @@ def make_handler(collector: Collector, history: History):
     return Handler
 
 
+def exit_with(pid: int):
+    """Stop the monitor when the launcher (and so the app window) has gone."""
+    while psutil.pid_exists(pid):
+        time.sleep(2)
+    logger.info(f"Launcher process {pid} ended - stopping")
+    os._exit(0)
+
+
 def main():
+    ap = argparse.ArgumentParser(description="VMware Workstation host monitor")
+    ap.add_argument("--exit-with", type=int, metavar="PID", help="exit when this process ends (used by the app launcher)")
+    ap.add_argument("--log", metavar="FILE", help="write the log to FILE (used when running without a console)")
+    args = ap.parse_args()
+    if args.log:
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        fh = logging.FileHandler(args.log, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+        root.addHandler(fh)
+    if args.exit_with:
+        threading.Thread(target=exit_with, args=(args.exit_with,), daemon=True, name="exit-with").start()
+
     cfg = load_config()
     db_path = cfg["history_db"]
     if not os.path.isabs(db_path):

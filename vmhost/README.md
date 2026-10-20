@@ -89,31 +89,44 @@ bars and a **Native** badge.
 
 ---
 
-## 3. Everyday use
+## 3. Everyday use — the desktop app
 
-**Start:** in an **Administrator** terminal:
+### Create the shortcut (once)
+
+In a normal PowerShell:
+
+```powershell
+cd C:\Tools\chkp-monitor\vmhost
+powershell -ExecutionPolicy Bypass -File .\install-shortcut.ps1
+```
+
+This puts a **VM Host Monitor** icon on the desktop and in the Start menu. To pin it to the
+taskbar, open Start, right-click **VM Host Monitor**, and choose **Pin to taskbar**. Run the
+script again if you ever move the folder; add `-Remove` to delete the shortcuts.
+
+### Use it
+
+- **Start:** double-click **VM Host Monitor** and answer **Yes** to the Windows (UAC) prompt.
+  The dashboard opens in its own window, with no browser tabs or address bar. On the very
+  first start a setup window appears for about a minute; that happens only once.
+- **Stop:** close the window. The monitor stops with it.
+- **Clicked No at the UAC prompt?** It still runs, just without the per-vCPU bars.
+- **Started it twice?** You just get a second window onto the same monitor.
+
+The window uses Microsoft Edge (or Chrome) in "app mode", with its own profile, so it
+remembers its size and position and does not touch your normal browser. Problems
+starting are shown in a message box; details are in `vmhost\vmhost.log`.
+
+### Without the shortcut (terminal)
+
+In an **Administrator** terminal (Ctrl+C stops it):
 
 ```powershell
 cd C:\Tools\chkp-monitor\vmhost
 powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
-**Stop:** press **Ctrl+C** in that window (or close it). The browser page then shows
-"monitor not responding".
-
-**Open the dashboard again** at any time while it runs: http://127.0.0.1:8090
-
-### Optional: a desktop shortcut that starts it elevated
-
-1. Right-click the desktop → **New → Shortcut**, and enter as the location:
-   ```
-   powershell.exe -ExecutionPolicy Bypass -File "C:\Tools\chkp-monitor\vmhost\run.ps1"
-   ```
-2. Name it **VM Host Monitor** → Finish.
-3. Right-click the shortcut → **Properties → Shortcut → Advanced…** → tick
-   **Run as administrator** → OK.
-
-Double-click it to start; close its window to stop.
+Then open http://127.0.0.1:8090 in any browser.
 
 ---
 
@@ -209,7 +222,9 @@ With Git: `cd C:\Tools\chkp-monitor; git pull` — your `config.json` changes ar
 | "Python 3.10 or newer was not found" | Do install Step 1, then open a **new** terminal |
 | Note "Per-vCPU load needs the monitor to run elevated" | The terminal was not *Run as administrator*. Stop and restart elevated |
 | A VM shows as `vmware-vmx (12345)` instead of its name | Add its parent folder to `vm_roots`, or run elevated; names can take ~15 seconds |
-| "monitor not responding" in the browser | The monitor was stopped or crashed — check its terminal, then start it again |
+| "monitor not responding" in the browser | The monitor was stopped or crashed — check its terminal (or `vmhost.log` when started from the shortcut), then start it again |
+| Shortcut does nothing, or shows "did not start within 30 seconds" | Read `C:\Tools\chkp-monitor\vmhost\vmhost.log`; try `run.ps1` in a terminal to see errors directly |
+| Shortcut icon is blank after moving the folder | Run `install-shortcut.ps1` again |
 | Browser doesn't open / page can't load | Wait a few seconds and refresh; if port 8090 is taken, change `port` |
 | "running scripts is disabled on this system" | Use the full command with `-ExecutionPolicy Bypass`, and run `Unblock-File` (install Step 2) |
 | `pip install psutil failed` | Check internet/proxy, then run `run.ps1` again — it retries |
@@ -220,8 +235,9 @@ With Git: `cd C:\Tools\chkp-monitor; git pull` — your `config.json` changes ar
 ## 9. Uninstall
 
 1. Stop the monitor.
-2. Delete `C:\Tools\chkp-monitor` (and the desktop shortcut, if you made one).
-3. Optional: `winget uninstall Python.Python.3.12`
+2. Remove the shortcuts: `powershell -ExecutionPolicy Bypass -File C:\Tools\chkp-monitor\vmhost\install-shortcut.ps1 -Remove`
+3. Delete `C:\Tools\chkp-monitor` and `%LOCALAPPDATA%\VMHostMonitor` (the app window's profile).
+4. Optional: `winget uninstall Python.Python.3.12`
 
 Nothing else is changed on the PC.
 
@@ -229,7 +245,8 @@ Nothing else is changed on the PC.
 
 ## How it works (for reference)
 
-- `run.ps1` finds Python, creates `.venv`, installs `psutil`, and starts `vmhost.py`.
+- `install-shortcut.ps1` creates the shortcuts; they run `app.ps1`, which runs first-time setup (`run.ps1 -SetupOnly`), starts `vmhost.py` hidden and elevated with `--exit-with <launcher PID>`, and opens the Edge/Chrome app window. Closing the window ends the launcher, and the monitor then stops itself.
+- `run.ps1` finds Python, creates `.venv`, installs `psutil`, and starts `vmhost.py` in the terminal.
 - `vmhost.py` samples every running `vmware-vmx.exe`: CPU time, memory, I/O and per-thread
   CPU. VMware names each vCPU thread `vcpu-N`, which gives the per-vCPU bars. Windows only
   lets an administrator read those threads.

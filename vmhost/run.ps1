@@ -4,7 +4,11 @@
     powershell -ExecutionPolicy Bypass -File .\run.ps1
   Needs Python 3.10+ (winget install Python.Python.3.12). Everything else is
   installed into .venv in this folder; delete the folder to remove it.
+
+  -SetupOnly : create .venv and install psutil, then exit (used by the desktop app launcher).
 #>
+param([switch]$SetupOnly)
+
 # 'Continue': under 'Stop', Windows PowerShell 5.1 turns any native stderr (even with 2>$null) into a terminating error.
 # Native exit codes are checked explicitly instead.
 $ErrorActionPreference = 'Continue'
@@ -50,6 +54,8 @@ if ($LASTEXITCODE -ne 0) {
   & $venvPy -m pip install --quiet --disable-pip-version-check psutil
   if ($LASTEXITCODE -ne 0) { throw 'pip install psutil failed (check internet / proxy)' }
 }
+
+if ($SetupOnly) { Write-Host 'Setup complete.' -ForegroundColor Green; exit 0 }
 
 $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
   [Security.Principal.WindowsBuiltInRole]::Administrator)
