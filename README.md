@@ -62,7 +62,16 @@ chkp-monitor/
 │   ├── gaia_api.py        # Tier 3: Gaia API /run-script
 │   └── ssh_fallback.py    # Tier 2: SSH via Paramiko
 ├── static/
-│   └── dashboard.html     # Single-page dashboard
+│   ├── dashboard.html     # Single-page dashboard
+│   └── cpview.html        # CPView time-series dashboard
+├── cpview_server.py       # CPView edition: Flask app + per-gateway collectors
+├── cpview_metrics.json    # Logical metric -> CPView table/column regexes
+├── cpview/
+│   ├── transport.py       # Gaia API run-script / SSH / local script runner
+│   ├── schema.py          # CPViewDB.dat schema discovery + metric resolution
+│   ├── collector.py       # Incremental CPView pull + system snapshot
+│   ├── store.py           # Local SQLite time-series store
+│   └── demo.py            # Synthetic gateways for --demo
 └── .gitignore
 ```
 
@@ -101,9 +110,56 @@ Edit `config.json` to adjust RAG thresholds:
 - Administrative rights on A-GUI
 - Network access to A-SMS and gateways on ports 443 and 22
 
+## CPView edition (Skyline-style time series)
+
+`cpview_server.py` is a second dashboard (http://localhost:8081) that gives you Skyline-style graphs **without** the OpenTelemetry agent, collector, Prometheus or Grafana. It reads the CPView history database that every Gaia gateway already keeps:
+
+```
+/var/log/CPView_history/CPViewDB.dat   (SQLite, one sample per minute, ~30 days)
+```
+
+| Skyline | chkp-monitor CPView edition |
+|---|---|
+| OpenTelemetry CPView agent on the gateway | nothing installed - `sqlite3` queries via Gaia API `run-script` (SSH fallback) |
+| OTel collector → Prometheus remote-write | incremental pull of rows newer than the last poll |
+| Prometheus TSDB | local SQLite store (`data/cpview_store.db`) |
+| Grafana dashboards | `static/cpview.html` - Single Machine, Machines Overview, Schema Explorer |
+| 15s resolution, history starts when enabled | 60s resolution, **backfills history the gateway already holds** |
+
+How it works:
+
+1. **Schema discovery** - CPView table/column names change between versions and Jumbo takes, so nothing is hard-coded. The gateway's `CREATE TABLE` statements are fetched and replayed into an in-memory SQLite DB to get exact column lists.
+2. **Metric catalogue** - `cpview_metrics.json` maps logical metrics (CPU per core, RAM, interface throughput, connections, drops, CoreXL...) to CPView tables/columns using ordered regex candidates. Unmatched metrics show a banner pointing to the Schema Explorer.
+3. **Collection** - each poll sends ONE script per gateway: `SELECT * FROM <table> WHERE Timestamp > <cursor>` for every mapped table, plus a small system snapshot (`fw ver`, `/proc/meminfo`, `df`, `cpstat fw -f policy`, `cphaprob stat`) for the overview tiles and gauges. First contact backfills `backfill_hours` of history in chunks.
+4. **Schema Explorer** - browse every CPView table, see which catalogue metric uses which column, chart any stored column, or read any table live from the gateway (last N minutes).
+
+Run it:
+
+```powershell
+python cpview_server.py           # uses config.json + credentials.json (bootstrap starts it for you)
+python cpview_server.py --demo    # two synthetic gateways, no lab needed (needs bash + sqlite3 CLI)
+```
+
+Settings live in the `cpview` block of `config.json`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `poll_interval_seconds` | 60 | CPView writes once a minute, so faster polling gains nothing |
+| `backfill_hours` | 24 | history pulled from the gateway on first contact |
+| `retention_days` | 7 | local store pruning (~14 MB per gateway per day) |
+| `max_rows_per_table` | 1500 | rows per table per poll (keeps run-script output small) |
+| `extra_tables` | `[]` | regexes of extra CPView tables to store even if no metric uses them |
+| `collect_all_tables` | false | store every CPView table |
+| `include_management` | false | also poll the management server (needs a Gaia API user there) |
+
+**First run on a new version:** open the Schema Explorer tab. If a panel says "No CPView table/column matched", find the right table there and add its name/column as a regex to that metric in `cpview_metrics.json`, then restart `cpview_server.py`. The demo DB schema is modelled on CPView but is synthetic; validate the mappings against your R81.20/R82 gateways.
+
+Prerequisites on the gateway: CPView history enabled (default; bootstrap checks for the DB file and runs `cpview history on` if it is missing) and the Gaia API user from bootstrap (uid 0 / adminRole, which can read `/var/log/CPView_history`).
+
 ## Future enhancements
 
 - In-session CSV/JSON logging for trend analysis
 - Skyline integration via Infinity Portal API
+- CPView edition: per-VS context for VSX, alert rules on catalogue metrics
 - Additional Gaia API native endpoints (NTP, routes, interfaces)
 - Alert notifications via desktop toast

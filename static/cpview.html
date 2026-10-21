@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>chkp-monitor · CPView</title>
+    <script src="/vendor/chart.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0f1114;
+            --surface: #1a1d23;
+            --surface-hover: #22262e;
+            --border: #2a2e37;
+            --text: #e4e6eb;
+            --text-dim: #8b8f98;
+            --text-label: #6b7080;
+            --green: #22c55e;
+            --amber: #f59e0b;
+            --red: #ef4444;
+            --unknown: #6b7280;
+            --accent: #3b82f6;
+        }
+
+        body {
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 20px 24px;
+            font-size: 12px;
+        }
+
+        .header {
+            display: flex; flex-wrap: wrap; gap: 16px;
+            justify-content: space-between; align-items: center;
+            margin-bottom: 16px; padding-bottom: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+        .header h1 { font-size: 18px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
+        .header h1 span { color: var(--accent); }
+        .header-meta { display: flex; gap: 16px; align-items: center; font-size: 11px; color: var(--text-dim); }
+
+        .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 18px; }
+        .tabs, .ranges { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+        .tabs button, .ranges button {
+            background: var(--surface); color: var(--text-dim); border: none;
+            padding: 7px 12px; font: inherit; cursor: pointer; border-right: 1px solid var(--border);
+        }
+        .tabs button:last-child, .ranges button:last-child { border-right: none; }
+        .tabs button.active, .ranges button.active { background: var(--surface-hover); color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+        .field { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+        .field label { background: var(--surface); color: var(--accent); padding: 7px 10px; border-right: 1px solid var(--border); }
+        select, input[type=text], input[type=number] {
+            background: var(--bg); color: var(--text); border: none; font: inherit; padding: 7px 10px; outline: none;
+        }
+        .spacer { flex: 1; }
+
+        .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; }
+        .status-dot.ok { background: var(--green); }
+        .status-dot.warning { background: var(--amber); }
+        .status-dot.error { background: var(--red); }
+        .status-dot.starting { background: var(--unknown); }
+
+        .section-title {
+            font-size: 13px; color: var(--text); margin: 22px 0 10px; letter-spacing: 0.5px;
+            display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+        }
+        .section-title::before { content: '⌄'; color: var(--text-dim); }
+        .section-title.collapsed::before { content: '›'; }
+        .section-body.collapsed { display: none; }
+
+        .banner {
+            border: 1px solid rgba(245,158,11,0.3); background: rgba(245,158,11,0.08);
+            color: var(--amber); padding: 10px 14px; border-radius: 6px; margin-bottom: 12px;
+        }
+        .banner.error { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.08); color: var(--red); }
+
+        /* ---- overview tiles ---- */
+        .overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+        .tile {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+            padding: 10px 12px; min-height: 70px; display: flex; flex-direction: column; justify-content: space-between;
+        }
+        .tile .label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-label); }
+        .tile .value { font-size: 15px; text-align: center; margin-top: 6px; word-break: break-word; }
+        .tile .value.big { font-size: 26px; }
+        .tile.wide { grid-column: span 2; }
+
+        .gauges { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
+        .gauge { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; text-align: center; }
+        .gauge .label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-label); text-align: left; }
+        .gauge svg { width: 100%; max-width: 150px; height: 100px; }
+
+        .topbars { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; margin-top: 8px; }
+        .bar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+        .bar-row .name { width: 70px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+        .bar-row .track { flex: 1; height: 16px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+        .bar-row .fill { height: 100%; }
+        .bar-row .val { width: 90px; text-align: right; }
+
+        /* ---- chart panels ---- */
+        .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 10px; }
+        .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px; min-width: 0; }
+        .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+        .panel-title { font-size: 12px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+        .panel-src { font-size: 10px; color: var(--text-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .chart-box { position: relative; height: 210px; }
+        .panel-empty { height: 210px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--text-label); padding: 20px; }
+        table.legend { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11px; }
+        table.legend th { color: var(--accent); font-weight: normal; text-align: right; padding: 2px 6px; }
+        table.legend th:first-child { text-align: left; }
+        table.legend td { padding: 2px 6px; text-align: right; color: var(--text-dim); border-top: 1px solid var(--border); }
+        table.legend td:first-child { text-align: left; color: var(--text); }
+        .swatch { display: inline-block; width: 10px; height: 3px; margin-right: 6px; vertical-align: middle; }
+
+        /* ---- machines overview ---- */
+        .machines { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 10px; }
+        .machine { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 14px; cursor: pointer; }
+        .machine:hover { background: var(--surface-hover); }
+        .machine-head { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .machine-head .name { font-size: 15px; font-weight: 600; }
+        .machine-head .sub { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
+        .machine .gauges { grid-template-columns: repeat(5, 1fr); margin-top: 0; }
+        .machine .gauge { padding: 4px; border: none; background: transparent; }
+        .machine .gauge svg { height: 70px; }
+        .machine .kv { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+        .kv div span { display: block; font-size: 10px; color: var(--text-label); text-transform: uppercase; }
+
+        /* ---- explorer ---- */
+        .explorer { display: grid; grid-template-columns: 340px 1fr; gap: 10px; }
+        @media (max-width: 900px) { .explorer { grid-template-columns: 1fr; } .panels, .machines { grid-template-columns: 1fr; } }
+        .tlist { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; max-height: 78vh; overflow: auto; }
+        .tlist input { width: 100%; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+        .titem { padding: 7px 10px; border-bottom: 1px solid var(--border); cursor: pointer; word-break: break-all; }
+        .titem:hover, .titem.active { background: var(--surface-hover); }
+        .badge { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-left: 4px; text-transform: uppercase; }
+        .badge.c { background: rgba(34,197,94,0.15); color: var(--green); }
+        .badge.m { background: rgba(59,130,246,0.15); color: var(--accent); }
+        table.grid { width: 100%; border-collapse: collapse; font-size: 11px; }
+        table.grid th, table.grid td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+        table.grid th { color: var(--text-label); font-weight: normal; position: sticky; top: 0; background: var(--surface); }
+        .scroll { max-height: 320px; overflow: auto; margin-top: 8px; }
+        .btn {
+            background: var(--surface-hover); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+            padding: 6px 10px; font: inherit; cursor: pointer;
+        }
+        .btn:hover { border-color: var(--accent); }
+        .muted { color: var(--text-dim); }
+        .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+        code { color: var(--amber); }
+
+        .footer { text-align: center; padding: 22px 0 6px; font-size: 10px; color: var(--text-label); }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>chkp<span>-</span>monitor <span>·</span> cpview</h1>
+    <div class="header-meta">
+        <span id="collector-status"><span class="status-dot starting"></span>starting</span>
+        <span id="data-asof">—</span>
+        <a href="http://localhost:8080" style="color: var(--text-dim)">health dashboard ↗</a>
+    </div>
+</div>
+
+<div class="toolbar">
+    <div class="tabs" id="tabs">
+        <button data-view="single" class="active">Single Machine</button>
+        <button data-view="machines">Machines Overview</button>
+        <button data-view="explorer">Schema Explorer</button>
+    </div>
+    <div class="field"><label>Hostname</label><select id="host"></select></div>
+    <div class="spacer"></div>
+    <div class="ranges" id="ranges">
+        <button data-range="900">15m</button>
+        <button data-range="3600" class="active">1h</button>
+        <button data-range="21600">6h</button>
+        <button data-range="86400">24h</button>
+        <button data-range="604800">7d</button>
+    </div>
+    <div class="field"><label>Refresh</label>
+        <select id="refresh">
+            <option value="0">off</option>
+            <option value="15">15s</option>
+            <option value="30" selected>30s</option>
+            <option value="60">60s</option>
+        </select>
+    </div>
+</div>
+
+<div id="view"></div>
+
+<div class="footer">CPView history (CPViewDB.dat) · sampled every 60s by CPView · polled via Gaia API run-script, SSH fallback</div>
+
+<script>
+// ---------- state ----------
+const S = {
+    view: 'single', host: null, range: 3600, cfg: null, hosts: [],
+    charts: {}, timer: null, collapsed: {}, explorer: { table: null, filter: '' },
+};
+const PALETTE = ['#73bf69', '#f2cc0c', '#5794f2', '#ff9830', '#f2495c', '#b877d9', '#8ab8ff', '#fade2a', '#56a64b', '#ca95e5', '#ffb357', '#c4162a'];
+
+// Single Machine panels. Each metric id comes from cpview_metrics.json.
+// transform: 'sum' collapses labels into one series; negate draws below the axis (Grafana in/out style).
+const SECTIONS = [
+    { title: 'Basic CPU / Mem / Net / Disk', panels: [
+        { title: 'CPU Basic', unit: 'percent', metrics: [{ id: 'cpu_system', name: 'Busy System' }, { id: 'cpu_user', name: 'Busy User' }, { id: 'cpu_iowait', name: 'Busy Iowait' }] },
+        { title: 'Memory Basic', unit: 'bytes', metrics: [{ id: 'mem_used', name: 'RAM Used' }, { id: 'mem_free', name: 'RAM Free' }, { id: 'swap_used', name: 'Swap Used' }] },
+        { title: 'Network Basic', unit: 'bits_per_sec', metrics: [{ id: 'net_rx_bps', name: 'Receive', transform: 'sum' }, { id: 'net_tx_bps', name: 'Transmit', transform: 'sum', negate: true }] },
+        { title: 'Disk Space (Percentage)', unit: 'percent', metrics: [{ id: 'disk_used_pct' }] },
+    ]},
+    { title: 'CPU / CoreXL', panels: [
+        { title: 'CPU Usage By Cores', unit: 'percent', metrics: [{ id: 'cpu_core_usage' }] },
+        { title: 'CPU Interrupts', unit: 'per_sec', metrics: [{ id: 'cpu_interrupts' }] },
+        { title: 'CoreXL Instance CPU', unit: 'percent', metrics: [{ id: 'corexl_cpu' }] },
+        { title: 'CoreXL Instance Connections', unit: 'count', metrics: [{ id: 'corexl_conns' }] },
+    ]},
+    { title: 'Network', panels: [
+        { title: 'Network Traffic', unit: 'bits_per_sec', metrics: [{ id: 'net_rx_bps', suffix: ' - Receive' }, { id: 'net_tx_bps', suffix: ' - Transmit', negate: true }] },
+        { title: 'Packets Traffic', unit: 'packets_per_sec', metrics: [{ id: 'net_rx_pps', suffix: ' - Receive' }, { id: 'net_tx_pps', suffix: ' - Transmit', negate: true }] },
+        { title: 'Network Drops', unit: 'count', metrics: [{ id: 'net_rx_drops', suffix: ' - RX' }] },
+    ]},
+    { title: 'Connections & Drops', panels: [
+        { title: 'Concurrent Connections', unit: 'count', metrics: [{ id: 'conn_concurrent', name: 'Concurrent' }, { id: 'conn_tcp', name: 'TCP' }, { id: 'conn_udp', name: 'UDP' }, { id: 'conn_other', name: 'Other' }] },
+        { title: 'Connection Rate', unit: 'per_sec', metrics: [{ id: 'conn_rate', name: 'New connections' }] },
+        { title: 'Firewall Drops / Rejects', unit: 'per_sec', metrics: [{ id: 'fw_drops', name: 'Dropped' }, { id: 'fw_rejects', name: 'Rejected' }] },
+    ]},
+];
+
+// ---------- formatting ----------
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function fmtScaled(v, base, units) {
+    let i = 0; let x = Math.abs(v);
+    while (x >= base && i < units.length - 1) { x /= base; i++; }
+    const n = x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2);
+    return (v < 0 ? '-' : '') + n + ' ' + units[i];
+}
+function fmt(v, unit) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    switch (unit) {
+        case 'percent': return (Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2)) + '%';
+        case 'bytes': return fmtScaled(v, 1024, ['B', 'KB', 'MB', 'GB', 'TB']);
+        case 'kbytes': return fmtScaled(v * 1024, 1024, ['B', 'KB', 'MB', 'GB', 'TB']);
+        case 'bits_per_sec': return fmtScaled(v, 1000, ['b', 'kb', 'Mb', 'Gb', 'Tb']);
+        case 'bytes_per_sec': return fmtScaled(v, 1024, ['B/s', 'KB/s', 'MB/s', 'GB/s']);
+        case 'packets_per_sec': return fmtScaled(v, 1000, ['p/s', 'kp/s', 'Mp/s']);
+        case 'per_sec': return fmtScaled(v, 1000, ['/s', 'k/s', 'M/s']);
+        default: return Math.abs(v) >= 1000 ? fmtScaled(v, 1000, ['', 'k', 'M', 'G']) : (Number.isInteger(v) ? v : v.toFixed(2)).toString();
+    }
+}
+function fmtUptime(s) {
+    if (!s) return '—';
+    if (s < 3600) return (s / 60).toFixed(1) + ' min';
+    if (s < 86400) return (s / 3600).toFixed(2) + ' hours';
+    if (s < 86400 * 14) return (s / 86400).toFixed(1) + ' days';
+    return (s / 604800).toFixed(1) + ' week';
+}
+const fmtTime = ts => new Date(ts * 1000).toLocaleString();
+function tickTime(ms) {
+    const d = new Date(ms);
+    const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return S.range > 86400 ? d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + hm : hm;
+}
+
+function rag(value, kind) {
+    const t = (S.cfg && S.cfg.thresholds) || {};
+    const warn = t[kind + '_warn'] ?? 75, crit = t[kind + '_crit'] ?? 90;
+    if (value === null || value === undefined) return 'unknown';
+    return value >= crit ? 'red' : value >= warn ? 'amber' : 'green';
+}
+const ragColor = r => ({ green: 'var(--green)', amber: 'var(--amber)', red: 'var(--red)' }[r] || 'var(--unknown)');
+
+// ---------- API ----------
+async function api(path) {
+    const r = await fetch(path);
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    return r.json();
+}
+
+// ---------- gauges ----------
+function gaugeSvg(value, kind) {
+    const r = rag(value, kind);
+    const pct = Math.max(0, Math.min(100, value ?? 0));
+    const cx = 75, cy = 70, rad = 52, a0 = Math.PI * 0.8, sweep = Math.PI * 1.4;
+    const pt = a => [cx + rad * Math.cos(a), cy + rad * Math.sin(a)];
+    const arc = (from, to, color, w) => {
+        const [x1, y1] = pt(from), [x2, y2] = pt(to);
+        const large = (to - from) > Math.PI ? 1 : 0;
+        return `<path d="M ${x1} ${y1} A ${rad} ${rad} 0 ${large} 1 ${x2} ${y2}" stroke="${color}" stroke-width="${w}" fill="none" stroke-linecap="butt"/>`;
+    };
+    const t = (S.cfg && S.cfg.thresholds) || {};
+    const warn = (t[kind + '_warn'] ?? 75) / 100, crit = (t[kind + '_crit'] ?? 90) / 100;
+    return `<svg viewBox="0 0 150 100">
+        ${arc(a0, a0 + sweep * warn, 'rgba(34,197,94,0.5)', 3)}
+        ${arc(a0 + sweep * warn, a0 + sweep * crit, 'rgba(245,158,11,0.6)', 3)}
+        ${arc(a0 + sweep * crit, a0 + sweep, 'rgba(239,68,68,0.6)', 3)}
+        ${innerArc(cx, cy, rad - 10, a0, a0 + sweep, '#2a2e37')}
+        ${value === null || value === undefined ? '' : innerArc(cx, cy, rad - 10, a0, a0 + sweep * pct / 100, ragColor(r))}
+        <text x="75" y="80" text-anchor="middle" font-size="17" fill="${ragColor(r)}" font-family="inherit">${value === null || value === undefined ? '—' : fmt(value, 'percent')}</text>
+    </svg>`;
+}
+function innerArc(cx, cy, rad, from, to, color) {
+    if (to - from < 0.001) return '';
+    const [x1, y1] = [cx + rad * Math.cos(from), cy + rad * Math.sin(from)];
+    const [x2, y2] = [cx + rad * Math.cos(to), cy + rad * Math.sin(to)];
+    return `<path d="M ${x1} ${y1} A ${rad} ${rad} 0 ${(to - from) > Math.PI ? 1 : 0} 1 ${x2} ${y2}" stroke="${color}" stroke-width="12" fill="none"/>`;
+}
+const GAUGES = [
+    ['cpu_busy', 'CPU Busy', 'cpu'], ['ram_used', 'RAM Used', 'memory'], ['swap_used', 'Swap Used', 'memory'],
+    ['root_fs_used', 'Root FS Used', 'disk'], ['logs_fs_used', 'Logs FS Used', 'disk'],
+];
+
+// ---------- charts ----------
+function destroyCharts() {
+    Object.values(S.charts).forEach(c => c.destroy());
+    S.charts = {};
+}
+
+function legendTable(datasets, unit) {
+    const rows = datasets.map(ds => {
+        const ys = ds.data.map(p => p.y).filter(v => v !== null);
+        if (!ys.length) return '';
+        const sign = ds._negate ? -1 : 1;
+        const vals = ys.map(v => v * sign);
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        return `<tr><td><span class="swatch" style="background:${ds.borderColor}"></span>${esc(ds.label)}</td>
+            <td>${fmt(Math.min(...vals), unit)}</td><td>${fmt(Math.max(...vals), unit)}</td>
+            <td>${fmt(mean, unit)}</td><td>${fmt(vals[vals.length - 1], unit)}</td></tr>`;
+    }).join('');
+    return `<table class="legend"><tr><th></th><th>Min</th><th>Max</th><th>Mean</th><th>Last</th></tr>${rows}</table>`;
+}
+
+function drawChart(key, el, datasets, unit, start, end) {
+    if (typeof Chart === 'undefined') {
+        el.innerHTML = '<div class="panel-empty">Chart.js failed to load (no internet on this host?)</div>';
+        return;
+    }
+    if (S.charts[key]) S.charts[key].destroy();
+    const canvas = document.createElement('canvas');
+    el.innerHTML = '';
+    el.appendChild(canvas);
+    S.charts[key] = new Chart(canvas, {
+        type: 'line',
+        data: { datasets },
+        options: {
+            animation: false, responsive: true, maintainAspectRatio: false, parsing: false, normalized: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: items => items.length ? fmtTime(items[0].parsed.x / 1000) : '',
+                        label: c => ` ${c.dataset.label}: ${fmt(c.dataset._negate ? -c.parsed.y : c.parsed.y, unit)}`,
+                    },
+                },
+            },
+            elements: { point: { radius: 0, hitRadius: 6 }, line: { borderWidth: 1.5, tension: 0.15 } },
+            scales: {
+                x: { type: 'linear', min: start * 1000, max: end * 1000, grid: { color: '#22262e' },
+                     ticks: { color: '#8b8f98', maxTicksLimit: 8, callback: v => tickTime(v) } },
+                y: { grid: { color: '#22262e' }, ticks: { color: '#8b8f98', maxTicksLimit: 6, callback: v => fmt(v, unit) },
+                     ...(unit === 'percent' ? { suggestedMin: 0, suggestedMax: 100 } : {}) },
+            },
+        },
+    });
+}
+
+function toDataset(label, points, idx, negate) {
+    const color = PALETTE[idx % PALETTE.length];
+    return {
+        label, borderColor: color, backgroundColor: color + '22', fill: true, _negate: negate,
+        data: points.map(([ts, v]) => ({ x: ts * 1000, y: v === null ? null : (negate ? -v : v) })),
+    };
+}
+
+function sumSeries(series) {
+    const b = {};
+    series.forEach(s => s.points.forEach(([ts, v]) => { b[ts] = (b[ts] || 0) + v; }));
+    return Object.keys(b).map(Number).sort((a, c) => a - c).map(ts => [ts, b[ts]]);
+}
+
+async function renderPanel(panel, key) {
+    const box = document.getElementById(key);
+    if (!box) return;
+    const results = await Promise.all(panel.metrics.map(m =>
+        api(`/api/cpview/metric?host=${encodeURIComponent(S.host)}&id=${m.id}&range=${S.range}`).catch(e => ({ error: e.message }))));
+    const datasets = [];
+    const src = new Set();
+    const missing = [];
+    let start, end;
+    results.forEach((r, i) => {
+        const m = panel.metrics[i];
+        if (r.error || !r.mapped) { missing.push(m.id); return; }
+        start = r.start; end = r.end;
+        src.add(`${r.table}.${r.column}`);
+        if (m.transform === 'sum' && r.series.length) {
+            datasets.push(toDataset(m.name || r.title, sumSeries(r.series), datasets.length, m.negate));
+        } else {
+            r.series.forEach(s => {
+                const label = m.name && r.series.length === 1 ? m.name : s.label + (m.suffix || '');
+                datasets.push(toDataset(label, s.points, datasets.length, m.negate));
+            });
+        }
+    });
+    const srcEl = document.getElementById(key + '-src');
+    srcEl.textContent = [...src].join(', ');
+    srcEl.title = srcEl.textContent;
+    if (!datasets.length || datasets.every(d => !d.data.length)) {
+        box.innerHTML = `<div class="panel-empty">${missing.length === panel.metrics.length
+            ? `No CPView table/column matched <code>${esc(missing.join(', '))}</code> on this host.<br>Check the Schema Explorer and edit cpview_metrics.json.`
+            : 'No data in this time range yet.'}</div>`;
+        document.getElementById(key + '-legend').innerHTML = '';
+        return;
+    }
+    drawChart(key, box, datasets, panel.unit, start, end);
+    document.getElementById(key + '-legend').innerHTML = legendTable(datasets, panel.unit);
+}
+
+// ---------- views ----------
+function section(id, title, body) {
+    const c = S.collapsed[id];
+    return `<div class="section-title ${c ? 'collapsed' : ''}" data-section="${id}">${esc(title)}</div>
+            <div class="section-body ${c ? 'collapsed' : ''}" id="sec-${id}">${body}</div>`;
+}
+
+function hostEntry(name) { return S.hosts.find(h => h.name === name) || {}; }
+
+function statusBanner(h) {
+    const st = h.status || {};
+    if (st.state === 'error' || st.state === 'warning') {
+        return `<div class="banner ${st.state === 'error' ? 'error' : ''}">${esc(h.name)}: ${esc(st.error)}</div>`;
+    }
+    if (st.catching_up) return `<div class="banner">${esc(h.name)}: backfilling CPView history from the gateway…</div>`;
+    if (st.metrics_mapped < st.metrics_total) {
+        return `<div class="banner">${esc(h.name)}: ${st.metrics_mapped}/${st.metrics_total} catalogue metrics matched this CPView schema — see Schema Explorer.</div>`;
+    }
+    return '';
+}
+
+async function viewSingle() {
+    const h = hostEntry(S.host);
+    const i = h.info || {};
+    const tile = (label, value, cls = '') => `<div class="tile ${cls}"><div class="label">${label}</div><div class="value ${cls.includes('bigv') ? 'big' : ''}">${esc(value ?? '—')}</div></div>`;
+    const tiles = [
+        tile('Role', i.role, 'wide'),
+        tile('OS Version', i.os_version), tile('OS Edition', i.os_edition), tile('CPU Cores', i.cpu_cores),
+        tile('RAM Total', i.ram_total_bytes ? fmt(i.ram_total_bytes, 'bytes') : null),
+        tile('Swap Total', i.swap_total_bytes != null ? fmt(i.swap_total_bytes, 'bytes') : null),
+        tile('RootFS Total', i.root_fs_total_bytes ? fmt(i.root_fs_total_bytes, 'bytes') : null),
+        tile('Uptime', fmtUptime(i.uptime_seconds), 'bigv'),
+        tile('FW Build', i.fw_build), tile('Hardware', i.hardware),
+        tile('Policy Installed', i.policy_name), tile('Policy Date', i.policy_install_time, 'wide'),
+        tile('Cluster State', i.cluster_state || 'n/a'),
+        tile('CPView DB', i.db_present === false ? 'missing' : (i.db_bytes ? fmt(i.db_bytes, 'bytes') : null)),
+        tile('Collector', (h.status && h.status.method) || '—'),
+    ].join('');
+    const g = i.gauges || {};
+    const gauges = GAUGES.map(([k, label, kind]) => `<div class="gauge"><div class="label">${label}</div>${gaugeSvg(g[k], kind)}</div>`).join('');
+    const top = `<div class="topbars">
+        <div class="panel"><div class="panel-title">Top interfaces - Receive</div><div id="top-rx" class="muted">…</div></div>
+        <div class="panel"><div class="panel-title">Top interfaces - Transmit</div><div id="top-tx" class="muted">…</div></div>
+    </div>`;
+
+    let html = statusBanner(h);
+    html += section('overview', 'System Overview - Info / CPU / Mem / Disk',
+        `<div class="overview">${tiles}</div><div class="gauges">${gauges}</div>${top}`);
+    SECTIONS.forEach((sec, si) => {
+        const panels = sec.panels.map((p, pi) => {
+            const key = `p${si}_${pi}`;
+            return `<div class="panel"><div class="panel-head"><div class="panel-title">${esc(p.title)}</div>
+                    <div class="panel-src" id="${key}-src"></div></div>
+                    <div class="chart-box" id="${key}"><div class="panel-empty">loading…</div></div>
+                    <div id="${key}-legend"></div></div>`;
+        }).join('');
+        html += section('s' + si, sec.title, `<div class="panels">${panels}</div>`);
+    });
+    setView(html);
+
+    renderTopInterfaces();
+    const jobs = [];
+    SECTIONS.forEach((sec, si) => sec.panels.forEach((p, pi) => {
+        if (!S.collapsed['s' + si]) jobs.push(renderPanel(p, `p${si}_${pi}`));
+    }));
+    await Promise.all(jobs);
+}
+
+async function renderTopInterfaces() {
+    for (const [id, el] of [['net_rx_bps', 'top-rx'], ['net_tx_bps', 'top-tx']]) {
+        const box = document.getElementById(el);
+        try {
+            const r = await api(`/api/cpview/metric?host=${encodeURIComponent(S.host)}&id=${id}&range=900`);
+            const last = r.series.map(s => [s.label, (s.points[s.points.length - 1] || [0, 0])[1]])
+                .sort((a, b) => b[1] - a[1]).slice(0, 4);
+            const max = Math.max(1, ...last.map(x => x[1]));
+            box.innerHTML = last.length ? last.map(([n, v], k) => `<div class="bar-row"><div class="name" title="${esc(n)}">${esc(n)}</div>
+                <div class="track"><div class="fill" style="width:${100 * v / max}%;background:${k ? '#f2cc0c' : '#73bf69'}"></div></div>
+                <div class="val">${fmt(v, 'bits_per_sec')}</div></div>`).join('') : '<div class="muted">no data</div>';
+        } catch (e) { box.textContent = 'not mapped'; }
+    }
+}
+
+async function viewMachines() {
+    const hosts = S.hosts;
+    const byRole = {};
+    hosts.forEach(h => { const r = (h.info && h.info.role) || 'Unknown'; byRole[r] = (byRole[r] || 0) + 1; });
+    const topN = key => [...hosts].filter(h => h.info && h.info.gauges && h.info.gauges[key] != null)
+        .sort((a, b) => b.info.gauges[key] - a.info.gauges[key]).slice(0, 3);
+    const bars = (key, kind) => topN(key).map(h => {
+        const v = h.info.gauges[key];
+        return `<div class="bar-row"><div class="name">${esc(h.name)}</div><div class="track"><div class="fill" style="width:${v}%;background:${ragColor(rag(v, kind))}"></div></div><div class="val">${fmt(v, 'percent')}</div></div>`;
+    }).join('') || '<div class="muted">no data</div>';
+
+    let html = `<div class="topbars">
+        <div class="panel"><div class="panel-title">Assets Count</div>
+            <table class="grid" style="margin-top:8px"><tr><th>Role</th><th>Machine Count</th></tr>
+            ${Object.entries(byRole).map(([r, n]) => `<tr><td>${esc(r)}</td><td>${n}</td></tr>`).join('')}
+            <tr><td><b>Total</b></td><td><b>${hosts.length}</b></td></tr></table></div>
+        <div class="panel"><div class="panel-title">Top 3 Overall CPU Usage</div>${bars('cpu_busy', 'cpu')}</div>
+        <div class="panel"><div class="panel-title">Top 3 Overall RAM Usage</div>${bars('ram_used', 'memory')}</div>
+    </div><div class="machines" style="margin-top:10px">`;
+    hosts.forEach((h, n) => {
+        const i = h.info || {}, g = i.gauges || {}, st = h.status || {};
+        html += `<div class="machine" data-host="${esc(h.name)}">
+            <div class="machine-head"><div><div class="name">${esc(h.name)}</div>
+                <div class="sub">${esc(h.ip || '')} · ${esc(i.role || '—')}${i.cluster_state ? ' · ' + esc(i.cluster_state) : ''}</div></div>
+                <div><span class="status-dot ${esc(st.state || 'starting')}"></span>${esc(st.state || 'starting')}</div></div>
+            <div class="gauges">${GAUGES.map(([k, label, kind]) => `<div class="gauge"><div class="label">${label}</div>${gaugeSvg(g[k], kind)}</div>`).join('')}</div>
+            <div class="kv"><div><span>OS Version</span>${esc(i.os_version || '—')}</div><div><span>Hardware</span>${esc(i.hardware || '—')}</div>
+                <div><span>Policy</span>${esc(i.policy_name || '—')}</div><div><span>Uptime</span>${esc(fmtUptime(i.uptime_seconds))}</div></div>
+            <div class="chart-box" style="height:120px;margin-top:8px" id="m${n}"></div>
+        </div>`;
+    });
+    html += '</div>';
+    setView(html);
+    document.querySelectorAll('.machine').forEach(el => el.onclick = () => { S.host = el.dataset.host; document.getElementById('host').value = S.host; switchView('single'); });
+    await Promise.all(hosts.map(async (h, n) => {
+        const out = [];
+        let start, end;
+        for (const [id, label, neg] of [['net_rx_bps', 'RX', false], ['net_tx_bps', 'TX', true]]) {
+            try {
+                const r = await api(`/api/cpview/metric?host=${encodeURIComponent(h.name)}&id=${id}&range=${S.range}`);
+                if (!r.mapped) continue;
+                start = r.start; end = r.end;
+                out.push(toDataset(label, sumSeries(r.series), out.length, neg));
+            } catch (e) { /* host not ready */ }
+        }
+        const el = document.getElementById('m' + n);
+        if (out.length) drawChart('m' + n, el, out, 'bits_per_sec', start, end);
+        else el.innerHTML = '<div class="panel-empty" style="height:120px">no network data</div>';
+    }));
+}
+
+async function viewExplorer() {
+    let schema;
+    try { schema = await api(`/api/cpview/schema?host=${encodeURIComponent(S.host)}`); }
+    catch (e) { setView(`<div class="banner error">${esc(e.message)}</div>`); return; }
+    S.explorer.schema = schema;
+    const unmapped = schema.unmapped.length
+        ? `<div class="banner">Unmapped catalogue metrics on ${esc(S.host)}: <code>${esc(schema.unmapped.join(', '))}</code> — find the right table/column below and add a regex to <code>cpview_metrics.json</code>.</div>` : '';
+    setView(`${unmapped}<div class="muted" style="margin-bottom:8px">${esc(schema.db_path)} · ${schema.tables.length} tables · ${schema.tables.filter(t => t.collected).length} collected</div>
+        <div class="explorer">
+            <div class="tlist"><input type="text" id="tfilter" placeholder="filter tables…" value="${esc(S.explorer.filter)}"><div id="titems"></div></div>
+            <div id="tdetail"><div class="panel"><div class="muted">Select a table. Collected tables can be charted from the local store; any table can be read live from the gateway.</div></div></div>
+        </div>`);
+    const list = () => {
+        const f = S.explorer.filter.toLowerCase();
+        document.getElementById('titems').innerHTML = schema.tables.filter(t => t.name.toLowerCase().includes(f)).map(t =>
+            `<div class="titem ${t.name === S.explorer.table ? 'active' : ''}" data-t="${esc(t.name)}">${esc(t.name)}
+                ${t.collected ? '<span class="badge c">collected</span>' : ''}${t.mapped.length ? `<span class="badge m">${t.mapped.length} mapped</span>` : ''}</div>`).join('');
+        document.querySelectorAll('.titem').forEach(el => el.onclick = () => { S.explorer.table = el.dataset.t; list(); tableDetail(); });
+    };
+    document.getElementById('tfilter').oninput = e => { S.explorer.filter = e.target.value; list(); };
+    list();
+    if (S.explorer.table && schema.tables.some(t => t.name === S.explorer.table)) tableDetail();
+}
+
+function tableDetail() {
+    const t = S.explorer.schema.tables.find(x => x.name === S.explorer.table);
+    if (!t) return;
+    const role = c => c === t.ts ? 'timestamp' : t.labels.includes(c) ? 'label' : 'value';
+    const mappedBy = c => t.mapped.filter(m => m.column === c).map(m => m.id).join(', ');
+    const cols = [t.ts, ...t.labels, ...t.values];
+    document.getElementById('tdetail').innerHTML = `<div class="panel">
+        <div class="panel-title">${esc(t.name)}</div>
+        <div class="scroll" style="max-height:220px"><table class="grid"><tr><th>Column</th><th>Declared type</th><th>Role</th><th>Catalogue metric</th></tr>
+        ${cols.map(c => `<tr><td>${esc(c)}</td><td>${esc(t.types[c] || '')}</td><td>${role(c)}</td><td>${esc(mappedBy(c))}</td></tr>`).join('')}</table></div>
+        <div class="row">
+            <select id="xcol">${t.values.map(c => `<option>${esc(c)}</option>`).join('')}</select>
+            ${t.collected ? '<button class="btn" id="xstored">Chart stored data</button>' : ''}
+            <span class="muted">or read live:</span>
+            <input type="number" id="xmin" value="30" min="1" max="1440" style="width:70px;border:1px solid var(--border)"> <span class="muted">min</span>
+            <button class="btn" id="xlive">Query gateway</button>
+        </div>
+        <div class="panel-src" id="xsrc"></div>
+        <div class="chart-box" id="xchart"><div class="panel-empty">${t.values.length ? 'pick a column' : 'no numeric columns'}</div></div>
+        <div id="xlegend"></div>
+        <div class="scroll" id="xrows"></div>
+    </div>`;
+    const stored = document.getElementById('xstored');
+    if (stored) stored.onclick = async () => {
+        const col = document.getElementById('xcol').value;
+        const r = await api(`/api/cpview/series?host=${encodeURIComponent(S.host)}&table=${encodeURIComponent(t.name)}&column=${encodeURIComponent(col)}&range=${S.range}`);
+        const ds = r.series.map((s, k) => toDataset(s.label, s.points, k, false));
+        document.getElementById('xsrc').textContent = `stored · ${t.name}.${col} · step ${r.step}s`;
+        if (!ds.length) { document.getElementById('xchart').innerHTML = '<div class="panel-empty">no stored data in range</div>'; return; }
+        drawChart('xchart', document.getElementById('xchart'), ds, 'count', r.start, r.end);
+        document.getElementById('xlegend').innerHTML = legendTable(ds, 'count');
+    };
+    document.getElementById('xlive').onclick = async () => {
+        const col = document.getElementById('xcol').value;
+        const minutes = document.getElementById('xmin').value || 30;
+        document.getElementById('xsrc').textContent = 'querying gateway…';
+        let r;
+        try { r = await api(`/api/cpview/query?host=${encodeURIComponent(S.host)}&table=${encodeURIComponent(t.name)}&minutes=${minutes}`); }
+        catch (e) { document.getElementById('xsrc').textContent = 'error: ' + e.message; return; }
+        document.getElementById('xsrc').textContent = `live · ${r.rows.length} rows from gateway`;
+        const ti = r.header.indexOf(r.ts), ci = r.header.indexOf(col);
+        const li = r.labels.map(l => r.header.indexOf(l)).filter(x => x >= 0);
+        const groups = {};
+        r.rows.forEach(row => {
+            const label = li.map(x => row[x]).filter(Boolean).join(' / ') || col;
+            const v = parseFloat(row[ci]);
+            if (!isNaN(v)) (groups[label] = groups[label] || []).push([parseInt(row[ti]), v]);
+        });
+        const ds = Object.entries(groups).map(([l, p], k) => toDataset(l, p, k, false));
+        const allTs = r.rows.map(row => parseInt(row[ti])).filter(x => !isNaN(x));
+        if (ds.length && ci >= 0) {
+            drawChart('xchart', document.getElementById('xchart'), ds, 'count', Math.min(...allTs), Math.max(...allTs));
+            document.getElementById('xlegend').innerHTML = legendTable(ds, 'count');
+        }
+        const show = r.rows.slice(-200).reverse();
+        document.getElementById('xrows').innerHTML = `<table class="grid"><tr>${r.header.map(h => `<th>${esc(h)}</th>`).join('')}</tr>
+            ${show.map(row => `<tr>${row.map((v, k) => `<td>${k === ti ? esc(fmtTime(parseInt(v))) : esc(v)}</td>`).join('')}</tr>`).join('')}</table>`;
+    };
+}
+
+// ---------- shell ----------
+function setView(html) {
+    destroyCharts();
+    const v = document.getElementById('view');
+    v.innerHTML = html;
+    v.querySelectorAll('.section-title').forEach(el => el.onclick = () => {
+        const id = el.dataset.section;
+        S.collapsed[id] = !S.collapsed[id];
+        el.classList.toggle('collapsed');
+        document.getElementById('sec-' + id).classList.toggle('collapsed');
+        if (!S.collapsed[id]) render();
+    });
+}
+
+async function refreshHosts() {
+    const d = await api('/api/cpview/hosts');
+    S.hosts = d.hosts;
+    const sel = document.getElementById('host');
+    if (sel.options.length !== d.hosts.length) {
+        sel.innerHTML = d.hosts.map(h => `<option>${esc(h.name)}</option>`).join('');
+    }
+    if (!S.host || !d.hosts.some(h => h.name === S.host)) S.host = d.hosts.length ? d.hosts[0].name : null;
+    sel.value = S.host;
+
+    const states = d.hosts.map(h => (h.status || {}).state);
+    const worst = states.includes('error') ? 'error' : states.includes('warning') ? 'warning' : states.every(s => s === 'ok') ? 'ok' : 'starting';
+    document.getElementById('collector-status').innerHTML = `<span class="status-dot ${worst}"></span>${worst} · ${d.hosts.length} hosts · ${fmt(d.store.samples, 'count')} samples`;
+    const h = hostEntry(S.host);
+    document.getElementById('data-asof').textContent = h.latest_ts ? 'data as of ' + fmtTime(h.latest_ts) : 'waiting for data';
+}
+
+let rendering = false;
+async function render() {
+    if (rendering) return;
+    rendering = true;
+    try {
+        await refreshHosts();
+        if (!S.host) { setView('<div class="banner">No gateways configured.</div>'); return; }
+        if (S.view === 'single') await viewSingle();
+        else if (S.view === 'machines') await viewMachines();
+        else await viewExplorer();
+    } catch (e) {
+        setView(`<div class="banner error">Dashboard error: ${esc(e.message)}</div>`);
+    } finally {
+        rendering = false;
+    }
+}
+
+function switchView(v) {
+    S.view = v;
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+    render();
+}
+
+function schedule() {
+    clearInterval(S.timer);
+    const sec = parseInt(document.getElementById('refresh').value);
+    // The explorer is interactive - don't wipe it under the user
+    if (sec > 0) S.timer = setInterval(() => { if (S.view !== 'explorer') render(); }, sec * 1000);
+}
+
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => switchView(b.dataset.view));
+document.querySelectorAll('#ranges button').forEach(b => b.onclick = () => {
+    S.range = parseInt(b.dataset.range);
+    document.querySelectorAll('#ranges button').forEach(x => x.classList.toggle('active', x === b));
+    render();
+});
+document.getElementById('host').onchange = e => { S.host = e.target.value; render(); };
+document.getElementById('refresh').onchange = schedule;
+
+(async () => {
+    try { S.cfg = await api('/api/cpview/config'); } catch (e) { S.cfg = { thresholds: {} }; }
+    await render();
+    schedule();
+})();
+</script>
+</body>
+</html>

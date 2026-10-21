@@ -145,6 +145,8 @@ if (Test-Path $INSTALL_DIR) {
 New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
 New-Item -ItemType Directory -Path "$INSTALL_DIR\collectors" -Force | Out-Null
 New-Item -ItemType Directory -Path "$INSTALL_DIR\static" -Force | Out-Null
+New-Item -ItemType Directory -Path "$INSTALL_DIR\static\vendor" -Force | Out-Null
+New-Item -ItemType Directory -Path "$INSTALL_DIR\cpview" -Force | Out-Null
 
 $files = @(
     "config.json",
@@ -153,7 +155,16 @@ $files = @(
     "collectors/mgmt_api.py",
     "collectors/gaia_api.py",
     "collectors/ssh_fallback.py",
-    "static/dashboard.html"
+    "static/dashboard.html",
+    "cpview_server.py",
+    "cpview_metrics.json",
+    "cpview/__init__.py",
+    "cpview/collector.py",
+    "cpview/demo.py",
+    "cpview/schema.py",
+    "cpview/store.py",
+    "cpview/transport.py",
+    "static/cpview.html"
 )
 
 foreach ($file in $files) {
@@ -161,6 +172,14 @@ foreach ($file in $files) {
     $dest = "$INSTALL_DIR\$($file -replace '/', '\')"
     Write-Host "  Downloading $file..." -ForegroundColor White
     Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+}
+
+# Chart.js for the CPView dashboard - served locally so the page still works if the CDN is blocked later
+try {
+    Invoke-WebRequest -Uri "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" -OutFile "$INSTALL_DIR\static\vendor\chart.umd.min.js" -UseBasicParsing
+    Write-Host "  Chart.js downloaded" -ForegroundColor White
+} catch {
+    Write-Host "  Chart.js download failed - CPView dashboard will load it from the CDN" -ForegroundColor Yellow
 }
 
 Write-Host "  Files downloaded to $INSTALL_DIR" -ForegroundColor Green
@@ -326,6 +345,15 @@ foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
             Write-Host "  [$gwName] Gaia API result: $($gaiaResult.Substring(0, [Math]::Min(200, $gaiaResult.Length)))" -ForegroundColor Yellow
         }
 
+        # 7e2: Check the CPView history DB used by cpview_server.py
+        $cpvResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "ls -l /var/log/CPView_history/CPViewDB.dat 2>&1"
+        if ($cpvResult -match "CPViewDB.dat" -and $cpvResult -notmatch "No such file") {
+            Write-Host "  [$gwName] CPView history DB present" -ForegroundColor Green
+        } else {
+            Write-Host "  [$gwName] CPView history DB missing - enabling 'cpview history'" -ForegroundColor Yellow
+            $null = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "cpview history on 2>&1"
+        }
+
         # 7f: Save config and restore shell
         Write-Host "  [$gwName] Saving config and restoring shell..." -ForegroundColor White
         $null = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "clish -c 'save config' 2>&1"
@@ -359,6 +387,7 @@ Write-Host "====================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Location:  $INSTALL_DIR" -ForegroundColor White
 Write-Host "  Dashboard: http://localhost:8080" -ForegroundColor White
+Write-Host "  CPView:    http://localhost:8081" -ForegroundColor White
 Write-Host ""
 Write-Host "  Mgmt API user:  $MONITOR_USER" -ForegroundColor White
 Write-Host "  Gaia API user:  $GAIA_MON_USER" -ForegroundColor White
@@ -375,4 +404,6 @@ Write-Host "(Press Ctrl+C to stop)" -ForegroundColor Gray
 Write-Host ""
 
 Set-Location $INSTALL_DIR
+# CPView time-series dashboard runs in its own window
+Start-Process -FilePath "python" -ArgumentList "cpview_server.py" -WorkingDirectory $INSTALL_DIR
 & python server.py

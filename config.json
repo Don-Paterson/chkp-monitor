@@ -36,5 +36,18 @@
         "connections_crit": 40000,
         "kernel_memory_warn": 75,
         "kernel_memory_crit": 90
+    },
+    "cpview": {
+        "port": 8081,
+        "poll_interval_seconds": 60,
+        "backfill_hours": 24,
+        "retention_days": 7,
+        "max_rows_per_table": 1500,
+        "db_path": "/var/log/CPView_history/CPViewDB.dat",
+        "store_path": "data/cpview_store.db",
+        "extra_tables": [],
+        "collect_all_tables": false,
+        "include_management": false,
+        "ssh_fallback": true
     }
 }
