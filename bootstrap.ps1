@@ -368,7 +368,9 @@ foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
             Write-Host "  [$gwName] CPView history DB present" -ForegroundColor Green
         } else {
             Write-Host "  [$gwName] CPView history DB missing - enabling 'cpview history'" -ForegroundColor Yellow
-            $null = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "cpview history on 2>&1"
+            $onResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "cpview history on 2>&1; echo '---'; cpview history stat 2>&1"
+            Write-Host "  [$gwName] $($onResult -replace "`r?`n", ' | ')" -ForegroundColor White
+            Write-Host "  [$gwName] The DB appears within a few minutes; cpview_server.py retries every poll" -ForegroundColor White
         }
 
         # 7f: Save config and restore shell

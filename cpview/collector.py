@@ -103,7 +103,7 @@ class CpviewCollector:
             return False
         self.sqlite_bin = sqlite_bin
         if not found:
-            self._fail(f"no readable CPView history DB - run 'cpview history on' on the gateway. Gateway says: {diag}")
+            self._fail(f"CPView history is not enabled or the DB is missing - on the gateway (expert mode) run 'cpview history on', then wait a few minutes; this collector retries every poll. Gateway says: {diag}")
             return False
         paths = [p for _, _, p in found]
         if self.db_path not in paths:
