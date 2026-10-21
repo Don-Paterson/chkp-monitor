@@ -19,7 +19,10 @@ $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
 # ---- Configuration ----
-$REPO_URL      = "https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/main"
+# Branch to install from. Override to test a branch before it is merged:
+#   $env:CHKP_BRANCH = "cpview-monitor"; irm https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/cpview-monitor/bootstrap.ps1 | iex
+$BRANCH        = if ($env:CHKP_BRANCH) { $env:CHKP_BRANCH } else { "main" }
+$REPO_URL      = "https://raw.githubusercontent.com/Don-Paterson/chkp-monitor/$BRANCH"
 $INSTALL_DIR   = "C:\chkp-monitor"
 $PYTHON_URL    = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
 $PS7_URL       = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.msi"
@@ -137,10 +140,24 @@ Write-Host "[3/8] Installing Python packages..." -ForegroundColor Yellow
 Write-Host "  Flask, requests, paramiko installed" -ForegroundColor Green
 
 # ---- Step 4: Download chkp-monitor files ----
-Write-Host "[4/8] Downloading chkp-monitor..." -ForegroundColor Yellow
+Write-Host "[4/8] Downloading chkp-monitor (branch: $BRANCH)..." -ForegroundColor Yellow
 
 if (Test-Path $INSTALL_DIR) {
-    Remove-Item -Recurse -Force $INSTALL_DIR
+    # Re-install: stop dashboards from a previous run and step out of the folder,
+    # otherwise Windows refuses to delete it ("in use")
+    Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'server\.py' } |
+        ForEach-Object {
+            Write-Host "  Stopping previous dashboard (PID $($_.ProcessId))" -ForegroundColor White
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    Start-Sleep -Seconds 2
+    if ((Get-Location).Path -like "$INSTALL_DIR*") { Set-Location $env:USERPROFILE }
+    try {
+        Remove-Item -Recurse -Force $INSTALL_DIR -ErrorAction Stop
+    } catch {
+        Write-Host "  Could not remove $INSTALL_DIR ($($_.Exception.Message)) - overwriting files in place" -ForegroundColor Yellow
+    }
 }
 New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
 New-Item -ItemType Directory -Path "$INSTALL_DIR\collectors" -Force | Out-Null
