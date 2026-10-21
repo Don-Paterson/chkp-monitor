@@ -202,7 +202,7 @@ class CpviewCollector:
         if info.get("db_present") is False:
             self.status.update(state="warning", error=f"{self.db_path} not found - run 'cpview history on'")
         elif (info.get("db_age_seconds") or 0) > 300:
-            self.status.update(state="warning", error="CPView history DB not updated for >5 min - check 'cpview history'")
+            self.status.update(state="warning", error="CPView history file not written for >5 min - R82 CPView Services may flush to disk in batches ('cpview -s stat'); graphs end at the last flush")
         return backlog
 
     def _ingest(self, table: str, text: str, prev_cursor: int | None) -> bool:
