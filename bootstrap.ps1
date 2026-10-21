@@ -178,6 +178,7 @@ $files = @(
     "cpview/__init__.py",
     "cpview/collector.py",
     "cpview/demo.py",
+    "cpview/live.py",
     "cpview/schema.py",
     "cpview/store.py",
     "cpview/transport.py",

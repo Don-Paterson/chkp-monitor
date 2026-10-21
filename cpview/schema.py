@@ -6,6 +6,11 @@ takes, so nothing is hard-coded. The gateway's CREATE TABLE statements are
 fetched once and replayed into an in-memory SQLite DB, where PRAGMA
 table_info gives the exact column list. Logical metrics from
 cpview_metrics.json are then resolved against that schema with regexes.
+
+R82 stores label strings (interface names, devices...) once in a lookup
+table and references them by number (`if_name INTEGER REFERENCES
+cpview_ref_table(seq)`); such columns are labels and are resolved to text
+by the collector using the "refs" recorded here.
 """
 import csv
 import io
@@ -46,9 +51,19 @@ def build_schema(schema_csv: str) -> dict:
     Turn the output of SCHEMA_SQL into:
       {table: {"columns": [...], "ts": col, "labels": [...], "values": [...]}}
     """
+    tables, _ = build_schema_full(schema_csv)
+    return tables
+
+
+def build_schema_full(schema_csv: str) -> tuple[dict, dict]:
+    """
+    Like build_schema, plus the column list of every referenced lookup table:
+      ({table: info}, {ref_table: [(col, type), ...]})
+    """
     _, rows = parse_csv(schema_csv)
     mem = sqlite3.connect(":memory:")
     tables = {}
+    all_columns = {}
     for row in rows:
         if len(row) < 2:
             continue
@@ -62,14 +77,17 @@ def build_schema(schema_csv: str) -> dict:
             continue
         cols = mem.execute(f'PRAGMA table_info("{name}")').fetchall()
         columns = [(c[1], c[2] or "") for c in cols]
+        all_columns[name] = columns
         ts = _find_ts(columns)
         if not ts:
             continue
+        # foreign_key_list rows: (id, seq, table, from, to, ...)
+        refs = {fk[3]: [fk[2], fk[4]] for fk in mem.execute(f'PRAGMA foreign_key_list("{name}")').fetchall()}
         labels, values = [], []
         for col, ctype in columns:
             if col == ts:
                 continue
-            if TEXT_TYPES.search(ctype) or LABEL_NAMES.search(col):
+            if col in refs or TEXT_TYPES.search(ctype) or LABEL_NAMES.search(col):
                 labels.append(col)
             else:
                 values.append(col)
@@ -79,9 +97,20 @@ def build_schema(schema_csv: str) -> dict:
             "ts": ts,
             "labels": labels,
             "values": values,
+            "refs": refs,
         }
     mem.close()
-    return tables
+    used = {r[0] for t in tables.values() for r in t["refs"].values()}
+    return tables, {t: all_columns[t] for t in used if t in all_columns}
+
+
+def ref_value_column(columns: list[tuple[str, str]], key: str) -> str | None:
+    """The human-readable column of a lookup table: first text column other than the key."""
+    others = [(c, t) for c, t in columns if c != key]
+    for c, t in others:
+        if TEXT_TYPES.search(t):
+            return c
+    return others[0][0] if others else None
 
 
 def _find_ts(columns: list[tuple[str, str]]) -> str | None:

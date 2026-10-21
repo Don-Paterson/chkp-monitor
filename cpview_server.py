@@ -20,6 +20,7 @@ import threading
 from flask import Flask, jsonify, redirect, request, send_from_directory
 
 from cpview.collector import CpviewCollector, DEFAULT_DB
+from cpview.live import LIVE_TABLE, shape
 from cpview.schema import parse_csv
 from cpview.store import Store
 from cpview.transport import GatewayTransport, LocalTransport, build_script, sqlite_cmd, split_sections
@@ -159,27 +160,66 @@ def api_metric():
     c, metric = get_collector(host), CATALOGUE_BY_ID.get(mid)
     if not c or not metric:
         return jsonify({"error": "unknown host or metric"}), 404
-    mapping = c.mapping.get(mid)
-    if not mapping:
+    mapping, live_id = c.mapping.get(mid), c.live_mapping.get(mid)
+    if not mapping and not live_id:
         return jsonify({"id": mid, "title": metric["title"], "unit": metric["unit"], "mapped": False, "series": []})
     start, end, step = window(host)
-    data = store.series(host, mapping["table"], mapping["column"], start, end, step)
+    db = store.series(host, mapping["table"], mapping["column"], start, end, step) if mapping else {}
+    live = {}
+    if live_id:
+        live = {k: v for k, v in shape(store.series(host, LIVE_TABLE, live_id, start, end, step), metric["live"]).items() if v}
+    data = _merge(live, db) if live else db
     if metric.get("agg") == "avg" and len(data) > 1:
         data = {"avg": _average(data)}
+    sources = ([f"cpview -m: {live_id}"] if live else []) + ([f"{mapping['table']}.{mapping['column']}"] if mapping and db else [])
     return jsonify({
         "id": mid, "title": metric["title"], "unit": metric["unit"], "mapped": True,
-        "table": mapping["table"], "column": mapping["column"],
+        "table": mapping["table"] if mapping else None, "column": mapping["column"] if mapping else None,
+        "live_metric": live_id, "source": " + ".join(sources),
         "start": start, "end": end, "step": step,
         "series": [{"label": k or metric["title"], "points": v} for k, v in sorted(data.items())],
     })
+
+
+def _merge(live: dict, db: dict) -> dict:
+    """
+    Live (cpview -m) series are authoritative; DB rows older than the first
+    live point are prepended as history. Single-series metrics merge into one
+    line; otherwise DB series join a live series with the same label, or are
+    shown separately as "<label> (history)".
+    """
+    first = min(points[0][0] for points in live.values())
+    older = {k: [p for p in v if p[0] < first] for k, v in db.items()}
+    older = {k: v for k, v in older.items() if v}
+    out = {k: list(v) for k, v in live.items()}
+    def join(hist, recent):
+        # A null point stops the chart drawing a line across the gap R82's batched flush leaves
+        gap = [[hist[-1][0] + 1, None]] if recent and recent[0][0] - hist[-1][0] > 300 else []
+        return hist + gap + recent
+
+    if len(out) == 1 and len(older) == 1:
+        key = next(iter(out))
+        out[key] = join(next(iter(older.values())), out[key])
+        return out
+    by_lower = {k.lower(): k for k in out}
+    for k, v in older.items():
+        match = by_lower.get(k.lower())
+        if match:
+            out[match] = join(v, out[match])
+        else:
+            out[f"{k} (history)"] = v
+    return out
 
 
 def _average(data: dict) -> list:
     buckets = {}
     for points in data.values():
         for ts, v in points:
-            buckets.setdefault(ts, []).append(v)
-    return [[ts, sum(vs) / len(vs)] for ts, vs in sorted(buckets.items())]
+            buckets.setdefault(ts, [])
+            if v is not None:
+                buckets[ts].append(v)
+    # Buckets holding only gap markers stay None so the chart line still breaks
+    return [[ts, sum(vs) / len(vs) if vs else None] for ts, vs in sorted(buckets.items())]
 
 
 @app.route("/api/cpview/series")
@@ -213,8 +253,17 @@ def api_schema():
         "collected": t in c.collect_tables,
         "mapped": mapped_tables.get(t, []),
     } for t, info in sorted(c.tables.items())]
-    unmapped = [m["id"] for m in CATALOGUE if not c.mapping.get(m["id"])]
+    unmapped = [m["id"] for m in CATALOGUE if not c.mapping.get(m["id"]) and not c.live_mapping.get(m["id"])]
     return jsonify({"host": host, "db_path": c.db_path, "tables": tables, "unmapped": unmapped})
+
+
+@app.route("/api/cpview/live")
+def api_live():
+    """Every metric from the last `cpview -m` on this host (Schema Explorer)."""
+    c = get_collector(request.args.get("host"))
+    if not c:
+        return jsonify({"error": "unknown host"}), 404
+    return jsonify({"timestamp": c.live_ts, "table": LIVE_TABLE, "metrics": c.live_index})
 
 
 @app.route("/api/cpview/query")

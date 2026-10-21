@@ -76,6 +76,7 @@
             color: var(--amber); padding: 10px 14px; border-radius: 6px; margin-bottom: 12px;
         }
         .banner.error { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.08); color: var(--red); }
+        .banner.note { border-color: var(--border); background: var(--surface); color: var(--text-dim); }
 
         /* ---- overview tiles ---- */
         .overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
@@ -138,6 +139,8 @@
         .badge { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-left: 4px; text-transform: uppercase; }
         .badge.c { background: rgba(34,197,94,0.15); color: var(--green); }
         .badge.m { background: rgba(59,130,246,0.15); color: var(--accent); }
+        .badge.l { background: rgba(245,158,11,0.15); color: var(--amber); }
+        .tgroup { padding: 6px 10px; color: var(--text-label); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; background: var(--bg); }
         table.grid { width: 100%; border-collapse: collapse; font-size: 11px; }
         table.grid th, table.grid td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
         table.grid th { color: var(--text-label); font-weight: normal; position: sticky; top: 0; background: var(--surface); }
@@ -357,7 +360,7 @@ function drawChart(key, el, datasets, unit, start, end) {
                     },
                 },
             },
-            elements: { point: { radius: 0, hitRadius: 6 }, line: { borderWidth: 1.5, tension: 0.15 } },
+            elements: { point: { radius: isolatedPoint, hitRadius: 6 }, line: { borderWidth: 1.5, tension: 0.15 } },
             scales: {
                 x: { type: 'linear', min: start * 1000, max: end * 1000, grid: { color: '#22262e' },
                      ticks: { color: '#8b8f98', maxTicksLimit: 8, callback: v => tickTime(v) } },
@@ -366,6 +369,15 @@ function drawChart(key, el, datasets, unit, start, end) {
             },
         },
     });
+}
+
+// Points are hidden except where a value has no neighbours (e.g. the first live
+// cpview -m sample after a gap) - otherwise it would not be drawn at all.
+function isolatedPoint(ctx) {
+    const d = ctx.dataset.data, i = ctx.dataIndex;
+    if (!d[i] || d[i].y === null) return 0;
+    const lone = p => !p || p.y === null;
+    return lone(d[i - 1]) && lone(d[i + 1]) ? 2.5 : 0;
 }
 
 function toDataset(label, points, idx, negate) {
@@ -378,7 +390,7 @@ function toDataset(label, points, idx, negate) {
 
 function sumSeries(series) {
     const b = {};
-    series.forEach(s => s.points.forEach(([ts, v]) => { b[ts] = (b[ts] || 0) + v; }));
+    series.forEach(s => s.points.forEach(([ts, v]) => { b[ts] = v === null ? (b[ts] ?? null) : (b[ts] || 0) + v; }));
     return Object.keys(b).map(Number).sort((a, c) => a - c).map(ts => [ts, b[ts]]);
 }
 
@@ -395,7 +407,7 @@ async function renderPanel(panel, key) {
         const m = panel.metrics[i];
         if (r.error || !r.mapped) { missing.push(m.id); return; }
         start = r.start; end = r.end;
-        src.add(`${r.table}.${r.column}`);
+        src.add(r.source || `${r.table}.${r.column}`);
         if (m.transform === 'sum' && r.series.length) {
             datasets.push(toDataset(m.name || r.title, sumSeries(r.series), datasets.length, m.negate));
         } else {
@@ -433,6 +445,7 @@ function statusBanner(h) {
     if (st.state === 'error' || st.state === 'warning') {
         return `<div class="banner ${st.state === 'error' ? 'error' : ''}">${esc(h.name)}: ${esc(st.error)}</div>`;
     }
+    if (st.db_note) return `<div class="banner note">${esc(h.name)}: ${esc(st.db_note)}</div>`;
     if (st.catching_up) return `<div class="banner">${esc(h.name)}: backfilling CPView history from the gateway…</div>`;
     if (st.metrics_mapped < st.metrics_total) {
         return `<div class="banner">${esc(h.name)}: ${st.metrics_mapped}/${st.metrics_total} catalogue metrics matched this CPView schema — see Schema Explorer.</div>`;
@@ -491,13 +504,17 @@ async function renderTopInterfaces() {
     for (const [id, el] of [['net_rx_bps', 'top-rx'], ['net_tx_bps', 'top-tx']]) {
         const box = document.getElementById(el);
         try {
-            const r = await api(`/api/cpview/metric?host=${encodeURIComponent(S.host)}&id=${id}&range=900`);
-            const last = r.series.map(s => [s.label, (s.points[s.points.length - 1] || [0, 0])[1]])
-                .sort((a, b) => b[1] - a[1]).slice(0, 4);
+            const r = await api(`/api/cpview/metric?host=${encodeURIComponent(S.host)}&id=${id}&range=${S.range}`);
+            const lastPt = s => [...s.points].reverse().find(p => p[1] !== null);
+            const pts = r.series.map(s => [s.label, lastPt(s)]).filter(x => x[1]);
+            const asOf = Math.max(0, ...pts.map(x => x[1][0]));
+            const last = pts.map(([l, p]) => [l, p[1]]).sort((a, b) => b[1] - a[1]).slice(0, 4);
             const max = Math.max(1, ...last.map(x => x[1]));
             box.innerHTML = last.length ? last.map(([n, v], k) => `<div class="bar-row"><div class="name" title="${esc(n)}">${esc(n)}</div>
                 <div class="track"><div class="fill" style="width:${100 * v / max}%;background:${k ? '#f2cc0c' : '#73bf69'}"></div></div>
-                <div class="val">${fmt(v, 'bits_per_sec')}</div></div>`).join('') : '<div class="muted">no data</div>';
+                <div class="val">${fmt(v, 'bits_per_sec')}</div></div>`).join('') +
+                (asOf && r.end - asOf > 600 ? `<div class="muted" style="margin-top:4px">as of ${esc(fmtTime(asOf))} (${esc(r.source)})</div>` : '')
+                : '<div class="muted">no data in this time range</div>';
         } catch (e) { box.textContent = 'not mapped'; }
     }
 }
@@ -558,26 +575,64 @@ async function viewExplorer() {
     try { schema = await api(`/api/cpview/schema?host=${encodeURIComponent(S.host)}`); }
     catch (e) { setView(`<div class="banner error">${esc(e.message)}</div>`); return; }
     S.explorer.schema = schema;
+    try { S.explorer.live = await api(`/api/cpview/live?host=${encodeURIComponent(S.host)}`); }
+    catch (e) { S.explorer.live = { metrics: [] }; }
+    const liveCount = S.explorer.live.metrics.length;
     const unmapped = schema.unmapped.length
         ? `<div class="banner">Unmapped catalogue metrics on ${esc(S.host)}: <code>${esc(schema.unmapped.join(', '))}</code> — find the right table/column below and add a regex to <code>cpview_metrics.json</code>.</div>` : '';
-    setView(`${unmapped}<div class="muted" style="margin-bottom:8px">${esc(schema.db_path)} · ${schema.tables.length} tables · ${schema.tables.filter(t => t.collected).length} collected</div>
+    setView(`${unmapped}<div class="muted" style="margin-bottom:8px">${esc(schema.db_path)} · ${schema.tables.length} tables · ${schema.tables.filter(t => t.collected).length} collected · ${liveCount} live cpview -m metrics</div>
         <div class="explorer">
             <div class="tlist"><input type="text" id="tfilter" placeholder="filter tables…" value="${esc(S.explorer.filter)}"><div id="titems"></div></div>
             <div id="tdetail"><div class="panel"><div class="muted">Select a table. Collected tables can be charted from the local store; any table can be read live from the gateway.</div></div></div>
         </div>`);
     const list = () => {
         const f = S.explorer.filter.toLowerCase();
-        document.getElementById('titems').innerHTML = schema.tables.filter(t => t.name.toLowerCase().includes(f)).map(t =>
-            `<div class="titem ${t.name === S.explorer.table ? 'active' : ''}" data-t="${esc(t.name)}">${esc(t.name)}
+        const lm = S.explorer.live.metrics.filter(m => (m.id || '').toLowerCase().includes(f));
+        const tb = schema.tables.filter(t => t.name.toLowerCase().includes(f));
+        document.getElementById('titems').innerHTML =
+            (lm.length ? `<div class="tgroup">live · cpview -m (${lm.length})</div>` : '') +
+            lm.map(m => `<div class="titem ${'live:' + m.id === S.explorer.table ? 'active' : ''}" data-t="live:${esc(m.id)}">${esc(m.id)}
+                <span class="badge l">live</span>${m.collected ? '<span class="badge c">collected</span>' : ''}</div>`).join('') +
+            `<div class="tgroup">history DB tables (${tb.length})</div>` +
+            tb.map(t => `<div class="titem ${t.name === S.explorer.table ? 'active' : ''}" data-t="${esc(t.name)}">${esc(t.name)}
                 ${t.collected ? '<span class="badge c">collected</span>' : ''}${t.mapped.length ? `<span class="badge m">${t.mapped.length} mapped</span>` : ''}</div>`).join('');
         document.querySelectorAll('.titem').forEach(el => el.onclick = () => { S.explorer.table = el.dataset.t; list(); tableDetail(); });
     };
     document.getElementById('tfilter').oninput = e => { S.explorer.filter = e.target.value; list(); };
     list();
-    if (S.explorer.table && schema.tables.some(t => t.name === S.explorer.table)) tableDetail();
+    if (S.explorer.table) tableDetail();
+}
+
+function liveDetail(id) {
+    const m = S.explorer.live.metrics.find(x => x.id === id);
+    const box = document.getElementById('tdetail');
+    if (!m) { box.innerHTML = '<div class="panel muted">not in the last cpview -m output</div>'; return; }
+    const keys = m.label_keys;
+    box.innerHTML = `<div class="panel">
+        <div class="panel-title">${esc(m.id)} <span class="badge l">live</span></div>
+        <div class="muted" style="margin:6px 0">${esc(m.description || '')}</div>
+        <div class="muted">type ${esc(m.type)} · unit ${esc(m.unit)} · labels: ${esc(keys.join(', ') || 'none')} · ${m.points} data points
+            ${m.collected ? '' : ' · not collected (add to a catalogue <code>live</code> spec or <code>cpview.live_extra</code>)'}</div>
+        ${m.collected ? '<div class="row"><button class="btn" id="lstored">Chart stored data</button></div>' : ''}
+        <div class="panel-src" id="xsrc"></div>
+        <div class="chart-box" id="xchart" style="${m.collected ? '' : 'display:none'}"></div>
+        <div id="xlegend"></div>
+        <div class="scroll"><table class="grid"><tr>${keys.map(k => `<th>${esc(k)}</th>`).join('')}<th>value</th></tr>
+            ${m.data.map(d => `<tr>${keys.map(k => `<td>${esc(d[k] ?? '')}</td>`).join('')}<td>${esc(d.value)}</td></tr>`).join('')}</table></div>
+    </div>`;
+    const btn = document.getElementById('lstored');
+    if (btn) btn.onclick = async () => {
+        const r = await api(`/api/cpview/series?host=${encodeURIComponent(S.host)}&table=${encodeURIComponent(S.explorer.live.table)}&column=${encodeURIComponent(m.id)}&range=${S.range}`);
+        const ds = r.series.map((s, k) => toDataset(s.label, s.points, k, false));
+        document.getElementById('xsrc').textContent = `stored · cpview -m ${m.id} · step ${r.step}s`;
+        if (!ds.length) { document.getElementById('xchart').innerHTML = '<div class="panel-empty">no stored data in range</div>'; return; }
+        drawChart('xchart', document.getElementById('xchart'), ds, 'count', r.start, r.end);
+        document.getElementById('xlegend').innerHTML = legendTable(ds, 'count');
+    };
 }
 
 function tableDetail() {
+    if (S.explorer.table.startsWith('live:')) return liveDetail(S.explorer.table.slice(5));
     const t = S.explorer.schema.tables.find(x => x.name === S.explorer.table);
     if (!t) return;
     const role = c => c === t.ts ? 'timestamp' : t.labels.includes(c) ? 'label' : 'value';

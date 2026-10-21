@@ -6,8 +6,10 @@ Per gateway, one background thread:
      catalogue against it.
   2. Every poll, sends ONE script that
        - pulls new rows (Timestamp > cursor) from each collected table
+       - runs `cpview -m` for live values (R82 flushes the DB only every few hours)
        - grabs a small system snapshot (version, uptime, /proc, df, policy)
-     and stores the results locally.
+     and stores the results locally. Label columns that reference a lookup
+     table (R82: cpview_ref_table) are resolved to names before storing.
 First contact backfills `backfill_hours` of history that the gateway already
 holds, in chunks of `max_rows_per_table`, polling quickly until caught up.
 """
@@ -16,7 +18,8 @@ import re
 import time
 import logging
 
-from cpview.schema import SCHEMA_SQL, build_schema, parse_csv, resolve_all
+from cpview.live import LIVE_TABLE, encode_labels, index_metrics, parse_metrics, resolve_live
+from cpview.schema import SCHEMA_SQL, build_schema_full, parse_csv, ref_value_column, resolve_all
 from cpview.transport import build_script, sqlite_cmd, split_sections
 
 logger = logging.getLogger("chkp-monitor.cpview.collector")
@@ -77,11 +80,19 @@ class CpviewCollector:
         self.mapping = {}
         self.collect_tables = []
         self.schema_time = 0
+        self.ref_meta = {}   # ref_table -> (key_col, value_col)
+        self.refs = {}       # ref_table -> {key: name}
+        self.live_enabled = cfg.get("live_metrics", True)
+        self.live_extra = [re.compile(p, re.I) for p in cfg.get("live_extra", [])]
+        self.live_mapping = {}
+        self.live_index = []
+        self.live_ts = None
         self.status = {
             "state": "starting", "error": None, "method": None, "last_poll": None,
             "db_present": None, "db_bytes": None, "db_age_seconds": None,
             "tables_total": 0, "tables_collected": 0, "catching_up": False,
             "metrics_mapped": 0, "metrics_total": len(catalogue),
+            "live_metrics": 0, "live_age_seconds": None, "db_note": None,
         }
 
     # ---- schema ----
@@ -130,7 +141,7 @@ class CpviewCollector:
             self._fail("gateway unreachable (Gaia API and SSH)")
             return False
         try:
-            tables = build_schema(split_sections(out).get("schema", ""))
+            tables, ref_tables = build_schema_full(split_sections(out).get("schema", ""))
         except RuntimeError as e:
             self._fail(f"sqlite3: {e}")
             return False
@@ -138,6 +149,13 @@ class CpviewCollector:
             self._fail(f"no CPView tables found in {self.db_path} - is 'cpview history' enabled?")
             return False
         self.tables = tables
+        self.ref_meta = {}
+        for rt, cols in ref_tables.items():
+            keys = {r[1] for t in tables.values() for r in t["refs"].values() if r[0] == rt}
+            key = next(iter(keys)) if keys else None
+            val = ref_value_column(cols, key) if key else None
+            if key and val:
+                self.ref_meta[rt] = (key, val)
         self.mapping = resolve_all(self.catalogue, tables)
         wanted = {m["table"] for m in self.mapping.values() if m}
         wanted |= {t for t in tables if any(p.search(t) for p in self.extra_tables)}
@@ -148,7 +166,7 @@ class CpviewCollector:
         self.store.set_schema(self.name, {
             "tables": tables, "mapping": self.mapping, "collected": self.collect_tables,
         })
-        mapped = sum(1 for m in self.mapping.values() if m)
+        mapped = self._mapped_count()
         self.status.update(tables_total=len(tables), tables_collected=len(self.collect_tables),
                            metrics_mapped=mapped)
         logger.info(f"{self.name}: {len(tables)} CPView tables, {mapped}/{len(self.catalogue)} metrics mapped, "
@@ -169,6 +187,8 @@ class CpviewCollector:
                 where = f'"{ts}" > (SELECT MAX("{ts}") FROM "{table}") - {self.backfill}'
             sql = f'SELECT * FROM "{table}" WHERE {where} ORDER BY "{ts}" LIMIT {self.max_rows}'
             sections.append((f"t{i}", sqlite_cmd(self.db_path, sql, self.sqlite_bin)))
+        if self.live_enabled:
+            sections.append(("live", "cpview -m 2>/dev/null"))
         sections += INFO_SECTIONS
 
         out = self.transport.run(self.gw, f"CPV_DB={_q(self.db_path)}\n" + build_script(sections))
@@ -179,9 +199,19 @@ class CpviewCollector:
 
         backlog = False
         errors = []
+        parsed = {}
         for i, table in enumerate(self.collect_tables):
             try:
-                more = self._ingest(table, parts.get(f"t{i}", ""), cursors.get(table))
+                parsed[table] = parse_csv(parts.get(f"t{i}", ""))
+            except Exception as e:
+                errors.append(f"{table}: {e}")
+        try:
+            self._fetch_refs(parsed)
+        except Exception as e:
+            errors.append(f"lookup names: {e}")
+        for table, (header, rows) in parsed.items():
+            try:
+                more = self._ingest(table, header, rows, cursors.get(table))
                 backlog = backlog or more
             except Exception as e:
                 errors.append(f"{table}: {e}")
@@ -191,6 +221,8 @@ class CpviewCollector:
         info = parse_info(parts)
         info["collector"] = {"method": self.transport.last_method.get(self.name)}
         self.store.set_info(self.name, info)
+        if self.live_enabled:
+            self._ingest_live(parts.get("live", ""), info.get("gateway_time"))
 
         self.status.update(
             state="ok", error=errors[0] if errors else None,
@@ -199,14 +231,107 @@ class CpviewCollector:
             db_present=info.get("db_present"), db_bytes=info.get("db_bytes"),
             db_age_seconds=info.get("db_age_seconds"),
         )
+        live_ok = self.live_ts is not None and info.get("gateway_time") and info["gateway_time"] - self.live_ts < 300
+        self.status.update(live_age_seconds=(info["gateway_time"] - self.live_ts) if self.live_ts and info.get("gateway_time") else None,
+                           metrics_mapped=self._mapped_count(), db_note=None)
+        # Lag of the newest stored DB row behind the gateway clock (file mtime is unreliable on R82)
+        cur = self.store.get_cursors(self.name)
+        db_latest = max((cur[t] for t in self.collect_tables if t in cur), default=None)
+        db_lag = (info["gateway_time"] - db_latest) if db_latest and info.get("gateway_time") else None
+        self.status["db_lag_seconds"] = db_lag
+        stale = None
         if info.get("db_present") is False:
-            self.status.update(state="warning", error=f"{self.db_path} not found - run 'cpview history on'")
-        elif (info.get("db_age_seconds") or 0) > 300:
-            self.status.update(state="warning", error="CPView history file not written for >5 min - R82 CPView Services may flush to disk in batches ('cpview -s stat'); graphs end at the last flush")
+            stale = f"{self.db_path} not found - enable CPView history ('cpview -s on' on R82)"
+        elif db_lag is not None and db_lag > 300 and not backlog:
+            stale = (f"newest CPView history row is {_ago(db_lag)} old - "
+                     "R82 CPView Services flushes the history DB to disk in batches")
+        if stale and live_ok:
+            # Live cpview -m covers "now"; the DB only supplies older history
+            self.status["db_note"] = stale + "; recent data comes from 'cpview -m'"
+        elif stale:
+            self.status.update(state="warning", error=stale + "; graphs end at the last flush")
         return backlog
 
-    def _ingest(self, table: str, text: str, prev_cursor: int | None) -> bool:
-        header, rows = parse_csv(text)
+    def _mapped_count(self) -> int:
+        return sum(1 for m in self.catalogue if self.mapping.get(m["id"]) or self.live_mapping.get(m["id"]))
+
+    # ---- lookup names (R82 cpview_ref_table) ----
+
+    def _fetch_refs(self, parsed: dict):
+        """Fetch names for any lookup keys seen in this batch that aren't cached yet."""
+        wanted = {}
+        for table, (header, rows) in parsed.items():
+            refs = self.tables[table].get("refs", {})
+            for col, (rt, _) in refs.items():
+                if rt not in self.ref_meta or col not in header:
+                    continue
+                i = header.index(col)
+                cache = self.refs.setdefault(rt, {})
+                for row in rows:
+                    v = row[i] if i < len(row) else ""
+                    if v.lstrip("-").isdigit() and int(v) >= 0 and int(v) not in cache:
+                        wanted.setdefault(rt, set()).add(int(v))
+        if not wanted:
+            return
+        sections = []
+        for rt, keys in wanted.items():
+            key, val = self.ref_meta[rt]
+            ids = sorted(keys)
+            for n in range(0, len(ids), 500):
+                chunk = ",".join(str(k) for k in ids[n:n + 500])
+                sql = f'SELECT "{key}", "{val}" FROM "{rt}" WHERE "{key}" IN ({chunk})'
+                sections.append((f"r{len(sections)}|{rt}", sqlite_cmd(self.db_path, sql, self.sqlite_bin)))
+        out = self.transport.run(self.gw, build_script(sections))
+        if out is None:
+            return
+        for sid, text in split_sections(out).items():
+            rt = sid.split("|", 1)[1]
+            _, rows = parse_csv(text)
+            for row in rows:
+                if len(row) >= 2 and row[0].lstrip("-").isdigit():
+                    self.refs[rt][int(row[0])] = row[1]
+
+    def _label(self, table: str, header: list, row: list, label_i: list) -> str:
+        refs = self.tables[table].get("refs", {})
+        parts = []
+        for i in label_i:
+            if i >= len(row) or row[i] in ("", "-1"):
+                continue
+            v = row[i]
+            ref = refs.get(header[i])
+            if ref and v.lstrip("-").isdigit():
+                v = self.refs.get(ref[0], {}).get(int(v), v)
+            parts.append(v)
+        return " / ".join(parts)
+
+    # ---- live cpview -m ----
+
+    def _ingest_live(self, text: str, gateway_time: int | None):
+        ts, metrics = parse_metrics(text)
+        if not metrics:
+            return
+        ts = int(ts or gateway_time or time.time())
+        ids = [m.get("metric-id") for m in metrics if m.get("metric-id")]
+        self.live_mapping = {m["id"]: resolve_live(m.get("live"), ids) for m in self.catalogue}
+        collect = {v for v in self.live_mapping.values() if v}
+        collect |= {i for i in ids if any(p.search(i) for p in self.live_extra)}
+        samples = []
+        for m in metrics:
+            mid = m.get("metric-id")
+            if mid not in collect:
+                continue
+            for point in m.get("data", []):
+                try:
+                    samples.append((mid, encode_labels(point), ts, float(point.get("value"))))
+                except (TypeError, ValueError):
+                    continue
+        self.store.add_samples(self.name, LIVE_TABLE, samples)
+        self.store.set_cursor(self.name, LIVE_TABLE, ts)
+        self.live_ts = ts
+        self.live_index = index_metrics(metrics, collect)
+        self.status["live_metrics"] = len(ids)
+
+    def _ingest(self, table: str, header: list, rows: list, prev_cursor: int | None) -> bool:
         if not rows:
             return False
         info = self.tables[table]
@@ -225,7 +350,7 @@ class CpviewCollector:
             except (ValueError, IndexError):
                 continue
             max_ts = max(max_ts, ts)
-            label = " / ".join(row[i] for i in label_i if i < len(row) and row[i] != "")
+            label = self._label(table, header, row, label_i)
             for col, i in value_i:
                 if i >= len(row) or row[i] == "":
                     continue
@@ -261,6 +386,10 @@ class CpviewCollector:
     def _fail(self, msg: str):
         logger.error(f"{self.name}: {msg}")
         self.status.update(state="error", error=msg, last_poll=time.time())
+
+
+def _ago(seconds: float) -> str:
+    return f"{seconds / 3600:.1f} h" if seconds >= 3600 else f"{int(seconds // 60)} min"
 
 
 def _q(s: str) -> str:
