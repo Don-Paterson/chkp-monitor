@@ -22,6 +22,18 @@ logger = logging.getLogger("chkp-monitor.cpview.collector")
 
 DEFAULT_DB = "/var/log/CPView_history/CPViewDB.dat"
 
+# Finds readable SQLite files (configured path first, then anything in the
+# CPView history dir) and a sqlite3 binary - run-script's PATH can be minimal.
+PROBE_SECTIONS = [
+    ("p_dbs", 'for f in "$CPV_DB" "$(dirname "$CPV_DB")"/* /var/log/CPView_history/*; do '
+              '[ -f "$f" ] && [ -r "$f" ] && [ "$(head -c 15 "$f" 2>/dev/null)" = "SQLite format 3" ] '
+              '&& echo "$(stat -c \'%Y %s\' "$f") $f"; done | sort -u'),
+    ("p_sqlite", 'command -v sqlite3 || for b in /usr/bin/sqlite3 /bin/sqlite3 /usr/local/bin/sqlite3 '
+                 '"$CPDIR"/bin/sqlite3 /opt/CPshrd-*/bin/sqlite3; do [ -x "$b" ] && echo "$b" && break; done'),
+    ("p_diag", 'echo "user: $(id)"; ls -la "$(dirname "$CPV_DB")" 2>&1 | head -15; '
+               'ls -ld /var/log/CPView_history 2>&1'),
+]
+
 INFO_SECTIONS = [
     ("i_now", "date +%s"),
     ("i_db", "stat -c '%s %Y' \"$CPV_DB\" 2>/dev/null || echo missing"),
@@ -50,6 +62,7 @@ class CpviewCollector:
         self.catalogue = catalogue
         self.cfg = cfg
         self.db_path = gw.get("cpview_db", cfg.get("db_path", DEFAULT_DB))
+        self.sqlite_bin = "sqlite3"
         self.max_rows = int(cfg.get("max_rows_per_table", 1500))
         self.backfill = int(float(cfg.get("backfill_hours", 24)) * 3600)
         self.extra_tables = [re.compile(p, re.I) for p in cfg.get("extra_tables", [])]
@@ -66,8 +79,43 @@ class CpviewCollector:
 
     # ---- schema ----
 
+    def locate_db(self) -> bool:
+        """
+        Confirm the CPView DB path and sqlite3 binary. Falls back to the newest
+        SQLite file in the history dir if the configured file isn't there; if
+        nothing usable is found, logs what the gateway does have.
+        """
+        out = self.transport.run(self.gw, f"CPV_DB={_q(self.db_path)}\n" + build_script(PROBE_SECTIONS))
+        if out is None:
+            self._fail("gateway unreachable (Gaia API and SSH)")
+            return False
+        parts = split_sections(out)
+        found = []
+        for line in parts.get("p_dbs", "").splitlines():
+            f = line.split(" ", 2)
+            if len(f) == 3 and f[0].isdigit():
+                found.append((int(f[0]), int(f[1]), f[2]))
+        sqlite_bin = (parts.get("p_sqlite", "").strip().splitlines() or [""])[0]
+        diag = " | ".join(l.strip() for l in parts.get("p_diag", "").splitlines() if l.strip())
+
+        if not sqlite_bin:
+            self._fail(f"sqlite3 binary not found in run-script environment. Gateway says: {diag}")
+            return False
+        self.sqlite_bin = sqlite_bin
+        if not found:
+            self._fail(f"no readable CPView history DB - run 'cpview history on' on the gateway. Gateway says: {diag}")
+            return False
+        paths = [p for _, _, p in found]
+        if self.db_path not in paths:
+            newest = max(found)[2]
+            logger.warning(f"{self.name}: {self.db_path} not usable, using {newest} (found: {paths})")
+            self.db_path = newest
+        return True
+
     def refresh_schema(self) -> bool:
-        script = f"CPV_DB={_q(self.db_path)}\n" + build_script([("schema", sqlite_cmd(self.db_path, SCHEMA_SQL))])
+        if not self.locate_db():
+            return False
+        script = f"CPV_DB={_q(self.db_path)}\n" + build_script([("schema", sqlite_cmd(self.db_path, SCHEMA_SQL, self.sqlite_bin))])
         out = self.transport.run(self.gw, script)
         if out is None:
             self._fail("gateway unreachable (Gaia API and SSH)")
@@ -111,7 +159,7 @@ class CpviewCollector:
             else:
                 where = f'"{ts}" > (SELECT MAX("{ts}") FROM "{table}") - {self.backfill}'
             sql = f'SELECT * FROM "{table}" WHERE {where} ORDER BY "{ts}" LIMIT {self.max_rows}'
-            sections.append((f"t{i}", sqlite_cmd(self.db_path, sql)))
+            sections.append((f"t{i}", sqlite_cmd(self.db_path, sql, self.sqlite_bin)))
         sections += INFO_SECTIONS
 
         out = self.transport.run(self.gw, f"CPV_DB={_q(self.db_path)}\n" + build_script(sections))

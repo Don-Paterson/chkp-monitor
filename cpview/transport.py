@@ -32,13 +32,13 @@ def build_script(sections: list[tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def sqlite_cmd(db_path: str, sql: str) -> str:
+def sqlite_cmd(db_path: str, sql: str, sqlite_bin: str = "sqlite3") -> str:
     """
     Shell command that runs one read-only query and prints CSV with a header row.
     The -r guard stops sqlite3 from creating an empty DB if the path is wrong.
     """
     db = shlex.quote(db_path)
-    return (f"if [ -r {db} ]; then sqlite3 -csv -header {db} {shlex.quote(sql)}; "
+    return (f"if [ -r {db} ]; then {shlex.quote(sqlite_bin)} -csv -header {db} {shlex.quote(sql)}; "
             f"else echo 'Error: {db_path} not readable'; fi")
 
 

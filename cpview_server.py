@@ -231,7 +231,7 @@ def api_query():
     ts = c.tables[tbl]["ts"]
     sql = (f'SELECT * FROM "{tbl}" WHERE "{ts}" > (SELECT MAX("{ts}") FROM "{tbl}") - {minutes * 60} '
            f'ORDER BY "{ts}" DESC LIMIT 1000')
-    out = transport.run(c.gw, build_script([("q", sqlite_cmd(c.db_path, sql))]))
+    out = transport.run(c.gw, build_script([("q", sqlite_cmd(c.db_path, sql, c.sqlite_bin))]))
     if out is None:
         return jsonify({"error": "gateway unreachable"}), 502
     try:
