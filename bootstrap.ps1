@@ -363,12 +363,14 @@ foreach ($gwHost in @($GW01_HOST, $GW02_HOST)) {
         }
 
         # 7e2: Check the CPView history DB used by cpview_server.py
-        $cpvResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "ls -l /var/log/CPView_history/CPViewDB.dat 2>&1"
-        if ($cpvResult -match "CPViewDB.dat" -and $cpvResult -notmatch "No such file") {
-            Write-Host "  [$gwName] CPView history DB present" -ForegroundColor Green
+        # R80.x/R81.x: /var/log/CPView_history (cpview history on|stat)
+        # R82:         /var/log/opt/CPshrd-R82/cpview_services (cpview -s on|stat)
+        $cpvResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "ls -l /var/log/CPView_history/*.dat /var/log/opt/CPshrd-*/cpview_services/*.dat 2>/dev/null"
+        if ($cpvResult -match "\.dat") {
+            Write-Host "  [$gwName] CPView history DB present: $(($cpvResult -split "`n")[0].Trim())" -ForegroundColor Green
         } else {
-            Write-Host "  [$gwName] CPView history DB missing - enabling 'cpview history'" -ForegroundColor Yellow
-            $onResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "cpview history on 2>&1; echo '---'; cpview history stat 2>&1"
+            Write-Host "  [$gwName] CPView history DB missing - enabling CPView services/history" -ForegroundColor Yellow
+            $onResult = Invoke-Plink -RemoteHost $gwHost -User $GAIA_ADMIN -Password $LAB_PASSWORD -Command "if cpview -h 2>&1 | grep -q -- '--services'; then cpview -s on 2>&1; cpview -s stat 2>&1; else cpview history on 2>&1; cpview history stat 2>&1; fi"
             Write-Host "  [$gwName] $($onResult -replace "`r?`n", ' | ')" -ForegroundColor White
             Write-Host "  [$gwName] The DB appears within a few minutes; cpview_server.py retries every poll" -ForegroundColor White
         }

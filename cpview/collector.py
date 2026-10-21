@@ -11,6 +11,7 @@ Per gateway, one background thread:
 First contact backfills `backfill_hours` of history that the gateway already
 holds, in chunks of `max_rows_per_table`, polling quickly until caught up.
 """
+import os
 import re
 import time
 import logging
@@ -22,16 +23,22 @@ logger = logging.getLogger("chkp-monitor.cpview.collector")
 
 DEFAULT_DB = "/var/log/CPView_history/CPViewDB.dat"
 
-# Finds readable SQLite files (configured path first, then anything in the
-# CPView history dir) and a sqlite3 binary - run-script's PATH can be minimal.
+# Where CPView keeps its history DB: R80.x-R81.x use CPView_history/CPViewDB.dat,
+# R82 moved it under CPView Services (cpview -s on|stat).
+HISTORY_GLOBS = '/var/log/CPView_history/* /var/log/opt/CPshrd-*/cpview_services/*'
+
+# Finds readable SQLite files (configured path first, then the known history
+# locations) and a sqlite3 binary - run-script's PATH can be minimal.
 PROBE_SECTIONS = [
-    ("p_dbs", 'for f in "$CPV_DB" "$(dirname "$CPV_DB")"/* /var/log/CPView_history/*; do '
+    ("p_dbs", f'for f in "$CPV_DB" "$(dirname "$CPV_DB")"/* {HISTORY_GLOBS}; do '
               '[ -f "$f" ] && [ -r "$f" ] && [ "$(head -c 15 "$f" 2>/dev/null)" = "SQLite format 3" ] '
               '&& echo "$(stat -c \'%Y %s\' "$f") $f"; done | sort -u'),
     ("p_sqlite", 'command -v sqlite3 || for b in /usr/bin/sqlite3 /bin/sqlite3 /usr/local/bin/sqlite3 '
                  '"$CPDIR"/bin/sqlite3 /opt/CPshrd-*/bin/sqlite3; do [ -x "$b" ] && echo "$b" && break; done'),
-    ("p_diag", 'echo "user: $(id)"; ls -la "$(dirname "$CPV_DB")" 2>&1 | head -15; '
-               'ls -ld /var/log/CPView_history 2>&1'),
+    # Shows each candidate's size and first bytes, so a non-SQLite format is obvious in the error
+    ("p_diag", f'echo "user: $(id)"; for f in "$CPV_DB" {HISTORY_GLOBS}; do [ -f "$f" ] && '
+               'echo "$f $(stat -c %s "$f")B header=$(head -c 16 "$f" | tr -c "[:print:]" ".")"; done; '
+               'cpview -s stat 2>/dev/null | head -3'),
 ]
 
 INFO_SECTIONS = [
@@ -103,11 +110,13 @@ class CpviewCollector:
             return False
         self.sqlite_bin = sqlite_bin
         if not found:
-            self._fail(f"CPView history is not enabled or the DB is missing - on the gateway (expert mode) run 'cpview history on', then wait a few minutes; this collector retries every poll. Gateway says: {diag}")
+            self._fail(f"CPView history is not enabled or the DB is missing - on the gateway (expert mode) run 'cpview -s on' (R82) or 'cpview history on' (R81.x), then wait a few minutes; this collector retries every poll. Gateway says: {diag}")
             return False
         paths = [p for _, _, p in found]
         if self.db_path not in paths:
-            newest = max(found)[2]
+            # Prefer CPView-named files over any other SQLite file in those dirs
+            named = [f for f in found if "cpview" in os.path.basename(f[2]).lower()]
+            newest = max(named or found)[2]
             logger.warning(f"{self.name}: {self.db_path} not usable, using {newest} (found: {paths})")
             self.db_path = newest
         return True

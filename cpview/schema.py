@@ -21,7 +21,11 @@ SCHEMA_SQL = "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS 
 TEXT_TYPES = re.compile(r"CHAR|TEXT|CLOB|STRING", re.IGNORECASE)
 # Untyped/integer columns that are still identifiers, not measurements
 LABEL_NAMES = re.compile(r"(^|_)(name|names|id|index|instance|iface|interface|partition|mount|vs|vsid)$", re.IGNORECASE)
-TS_NAMES = [re.compile(r"^timestamp$", re.I), re.compile(r"^(time|ts|time_stamp|sample_time)$", re.I)]
+TS_NAMES = [
+    re.compile(r"^timestamp$", re.I),
+    re.compile(r"^(time|ts|time_stamp|sample_time|epoch)$", re.I),
+    re.compile(r"(time_?stamp|^time|time$|^ts_|_ts$)", re.I),
+]
 
 
 def parse_csv(text: str) -> tuple[list[str], list[list[str]]]:
@@ -83,7 +87,7 @@ def build_schema(schema_csv: str) -> dict:
 def _find_ts(columns: list[tuple[str, str]]) -> str | None:
     for pattern in TS_NAMES:
         for col, _ in columns:
-            if pattern.match(col):
+            if pattern.search(col):
                 return col
     return None
 
